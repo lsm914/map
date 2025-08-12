@@ -1,0 +1,7 @@
+streamlit>=1.36
+pandas>=2.1
+numpy>=1.26
+requests>=2.32
+xmltodict>=0.13
+pydeck>=0.9
+pyarrow>=15
