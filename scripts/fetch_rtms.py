@@ -35,7 +35,7 @@ date_list = sorted(set(date_list))  # 오래→최근 순
 lawd_df = pd.read_csv("lawd_codes.csv")  # 컬럼: lawd_cd(5자리), sido_nm, sigungu_nm
 cent_df = pd.read_csv("sigungu_centroids.csv")  # 컬럼: lawd_cd, lat, lng, region_group(수도권/특광역시/지방)
 
-lawd_list = lawd_df["lawd_cd"].astype(str).str.zfill(5).unique().tolist()
+lawd_list = lawd_df["LAWD_CD"].astype(str).str.zfill(5).unique().tolist()
 
 # ---------- 3) 수집 ----------
 records = []
