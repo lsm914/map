@@ -1,0 +1,28 @@
+name: Fetch RTMS and Build Aggregates
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 18 * * *"  # 매일 03:20 KST(=18:20 UTC) 근처
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas pyarrow python-dateutil requests
+      - name: Run ETL
+        env:
+          MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
+        run: python scripts/fetch_rtms.py
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/*.parquet data/meta.json
+          git commit -m "ETL: update $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
+          git push
