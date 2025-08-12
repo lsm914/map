@@ -37,6 +37,19 @@ def month_list(n_months:int, end_month:str|None=None):
         m = end - pd.DateOffset(months=(n_months-1-i))
         months.append(f"{m.year:04d}{m.month:02d}")
     return months
+    
+def month_list(n_months:int, end_month:str|None=None):
+    """최근 N개월의 YYYYMM 리스트(오름차순)."""
+    if end_month:
+        end = datetime.strptime(end_month, "%Y%m")
+    else:
+        today = datetime.today()
+        end = datetime(today.year, today.month, 1)
+    months = []
+    for i in range(n_months):
+        m = end - relativedelta(months=(n_months-1-i))
+        months.append(f"{m.year:04d}{m.month:02d}")
+    return months
 
 def fetch_one(lawd_cd:str, ym:str, api_key:str, timeout=20, retries=3, sleep=0.4):
     params = {
@@ -106,6 +119,50 @@ def normalize_items(items, lawd_cd, ym):
     df["deal_dt"] = df.apply(mk_date, axis=1)
     return df
 
+def fetch_records_raw(lawd_cd: str, deal_ymd: str, service_key: str, num_of_rows: int = 999, timeout: int = 20):
+    """
+    params 미사용, 원문 URL 문자열로 호출 + 페이지네이션.
+    필요한 5개 필드만 추출해서 dict 리스트로 반환.
+    """
+    records = []
+
+    # 1) 첫 페이지 호출해 totalCount 파악
+    url_first = (
+        f"{BASE_URL}?LAWD_CD={lawd_cd}&DEAL_YMD={deal_ymd}"
+        f"&serviceKey={service_key}&pageNo=1&numOfRows={num_of_rows}"
+    )
+    r = requests.get(url_first, timeout=timeout, headers={"accept": "*/*"})
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+
+    total_count = int(root.findtext(".//totalCount", "0"))
+    total_pages = max(1, math.ceil(total_count / num_of_rows))
+
+    # 2) 모든 페이지 순회
+    for page in range(1, total_pages + 1):
+        url_page = (
+            f"{BASE_URL}?LAWD_CD={lawd_cd}&DEAL_YMD={deal_ymd}"
+            f"&serviceKey={service_key}&pageNo={page}&numOfRows={num_of_rows}"
+        )
+        rp = requests.get(url_page, timeout=timeout, headers={"accept": "*/*"})
+        rp.raise_for_status()
+        root_page = ET.fromstring(rp.content)
+
+        for item in root_page.findall(".//item"):
+            # 요청하신 5개 + 식별용 LAWD_CD/DEAL_YMD만 수집
+            records.append({
+                "LAWD_CD": lawd_cd,
+                "DEAL_YMD": deal_ymd,
+                "estateAgentSggNm": (item.findtext("estateAgentSggNm", "") or "").strip(),
+                "dealAmount": (item.findtext("dealAmount", "") or "").strip(),
+                "excluUseAr": (item.findtext("excluUseAr", "") or "").strip(),
+                "floor": (item.findtext("floor", "") or "").strip(),
+                "buildYear": (item.findtext("buildYear", "") or "").strip(),
+            })
+
+    return records
+
+
 def load_lawd_codes(path="lawd_codes.csv"):
     lc = pd.read_csv(path, dtype={"LAWD_CD":str, "SIDO_CD":str})
     # 최소 요구 컬럼 확인
@@ -124,33 +181,37 @@ def save_month(df_m, ym, outdir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--months", type=int, default=12, help="최근 N개월 수집")
+    ap.add_argument("--months", type=int, default=12, help="최근 N개월 수집 (기본 12개월)")
     ap.add_argument("--end-month", type=str, default=None, help="끝 YYYYMM (기본: 당월)")
-    ap.add_argument("--parallel", action="store_true", help="(옵션) 멀티프로세싱 사용")
+    ap.add_argument("--rows", type=int, default=999, help="numOfRows (기본 999)")
     args = ap.parse_args()
 
-    api_key = os.environ.get("MOLIT_API_KEY")
-    if not api_key:
-        print("ERROR: MOLIT_API_KEY is not set in environment.")
+    service_key = os.environ.get("MOLIT_API_KEY")
+    if not service_key:
+        print("ERROR: MOLIT_API_KEY is not set in environment (URL-encoded key expected).")
         sys.exit(1)
 
-    lc = load_lawd_codes("lawd_codes.csv")
+    lawd_list = load_lawd_codes("lawd_codes.csv")
     months = month_list(args.months, args.end_month)
     outdir = Path("data")
+
     all_parts = []
 
     for ym in months:
-        monthly_rows = []
-        for _, row in lc.iterrows():
-            lawd_cd = str(row["LAWD_CD"]).zfill(5)
-            items = fetch_one(lawd_cd, ym, api_key)
-            if not items:
+        month_records = []
+        for lawd_cd in lawd_list:
+            try:
+                recs = fetch_records_raw(lawd_cd, ym, service_key, num_of_rows=args.rows)
+                if recs:
+                    month_records.extend(recs)
+            except Exception as e:
+                print(f"[WARN] {lawd_cd}-{ym} failed: {e}")
                 continue
-            df = normalize_items(items, lawd_cd, ym)
-            if df is not None and not df.empty:
-                monthly_rows.append(df)
-        if monthly_rows:
-            df_m = pd.concat(monthly_rows, ignore_index=True)
+
+        if month_records:
+            df_m = pd.DataFrame(month_records, columns=[
+                "LAWD_CD","DEAL_YMD","estateAgentSggNm","dealAmount","excluUseAr","floor","buildYear"
+            ])
             save_month(df_m, ym, outdir)
             all_parts.append(df_m)
 
