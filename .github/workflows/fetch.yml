@@ -12,13 +12,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       - run: pip install -r requirements.txt
       - name: Run ETL
         env:
           MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
         run: |
-          python etl_fetch.py --months 12
+          python etl_fetch.py --months 1
       - name: Commit & Push
         run: |
           git config user.name "github-actions[bot]"
