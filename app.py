@@ -6,8 +6,20 @@ import numpy as np
 import json
 from urllib.request import urlopen
 from io import BytesIO
+from copy import deepcopy
 
 st.set_page_config(page_title="전국 아파트 실거래가 비교", layout="wide")
+
+# =========================
+# 유틸
+# =========================
+def fmt_int(x):
+    if pd.isna(x):
+        return "-"
+    try:
+        return f"{int(round(float(x))):,}"
+    except Exception:
+        return "-"
 
 # =========================
 # 데이터 로더 (캐시)
@@ -18,7 +30,6 @@ def load_parquet_local(path: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_parquet_url(url: str) -> pd.DataFrame:
-    # 일부 환경에서 pandas가 https 파케를 직접 못 읽을 수 있어 BytesIO로 우회
     with urlopen(url) as f:
         buf = BytesIO(f.read())
     return pd.read_parquet(buf)
@@ -33,8 +44,21 @@ def load_json_url(url: str) -> dict:
     with urlopen(url) as f:
         return json.loads(f.read().decode("utf-8"))
 
-# 깃허브 raw 베이스 경로
+@st.cache_data(ttl=86400)
+def load_geojson_local(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@st.cache_data(ttl=86400)
+def load_geojson_url(url: str) -> dict:
+    with urlopen(url) as f:
+        return json.loads(f.read().decode("utf-8"))
+
+# =========================
+# 경로
+# =========================
 DATA_BASE = "https://raw.githubusercontent.com/lsm914/map/main/data"
+REF_BASE  = "https://raw.githubusercontent.com/lsm914/map/main/ref"
 
 # 집계 데이터 로드 (로컬 우선, 실패 시 깃허브 raw)
 try:
@@ -48,13 +72,19 @@ try:
 except Exception:
     meta = load_json_url(f"{DATA_BASE}/meta.json")
 
+# 시군구 경계(GeoJSON) — 로컬 → 원격
+# 기대 스키마: feature.properties.SIG_CD == 5자리 시군구 코드(= LAWD_CD)
+try:
+    sgg = load_geojson_local("ref/sgg.geojson")
+except Exception:
+    sgg = load_geojson_url(f"{REF_BASE}/sgg.geojson")
+
 # =========================
 # 사이드바 UI
 # =========================
 st.sidebar.markdown("### 필터")
 st.sidebar.write(f"데이터 생성: {meta.get('generated_at','-')}")
 
-# 구버전 호환을 위해 segmented_control 대신 radio 사용
 period = st.sidebar.radio(
     "기간",
     ["1년~6개월","6개월~3개월","3개월~1개월","최근1개월"],
@@ -85,19 +115,11 @@ metric = st.sidebar.selectbox("표시값", ["평균 거래가(원)","m²당 가�
 # 필터 적용
 # =========================
 df = agg.copy()
-
-# 기간
 df = df[df["period_bucket"].eq(period)]
-
-# 신축/구축
 if new_old != "전체":
     df = df[df["new_old"].eq(new_old)]
-
-# 면적대
 if area_band:
     df = df[df["area_band"].isin(area_band)]
-
-# 권역
 if region_tab != "전국" and "region_group" in df.columns:
     df = df[df["region_group"].eq(region_tab)]
 
@@ -109,75 +131,109 @@ elif metric == "m²당 가격(원)":
 else:
     value_col = "n_trades"
 
-# 시군구 대표 포인트(동일 시군구 중복 → 평균/합)
-group_cols = ["LAWD_CD","sido_nm","sigungu_nm","lat","lng"]
+# 시군구 단위 대표값 (동일 시군구 복수 레코드 → 평균/합)
+group_cols = ["LAWD_CD","sido_nm","sigungu_nm"]
 agg_dict = {value_col: "mean", "n_trades": "sum"}
 map_df = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
 
 # 숫자형 보정
-if map_df[value_col].dtype.kind not in "iu":
-    map_df[value_col] = pd.to_numeric(map_df[value_col], errors="coerce")
+map_df[value_col] = pd.to_numeric(map_df[value_col], errors="coerce")
 map_df["n_trades"] = pd.to_numeric(map_df["n_trades"], errors="coerce").fillna(0).astype(int)
-map_df[value_col] = map_df[value_col].round()
+
+# 값 범위
+val_min = float(map_df[value_col].min()) if map_df[value_col].notna().any() else 0.0
+val_max = float(map_df[value_col].max()) if map_df[value_col].notna().any() else 1.0
+if val_min == val_max:
+    val_max = val_min + 1.0
 
 # =========================
-# 반경(Radius) 사전 계산 (JSON 내 함수 호출 금지 이슈 해결)
+# GeoJSON에 값 주입(조인) + 색상 사전계산
 # =========================
-# 원래 식: min(max(val/50, 1000), 20000)
-map_df["val"] = map_df[value_col].astype(float)
-map_df["radius"] = (map_df["val"] / 50.0)
-map_df["radius"] = map_df["radius"].clip(lower=1000, upper=20000)
-map_df["radius"] = map_df["radius"].fillna(1000)
+# join key: LAWD_CD (df) <-> SIG_CD (geojson)
+val_dict      = {str(k).zfill(5): float(v) for k, v in zip(map_df["LAWD_CD"], map_df[value_col])}
+trades_dict   = {str(k).zfill(5): int(v)   for k, v in zip(map_df["LAWD_CD"], map_df["n_trades"])}
+sido_dict     = {str(k).zfill(5): s        for k, s in zip(map_df["LAWD_CD"], map_df["sido_nm"])}
+sigungu_dict  = {str(k).zfill(5): s        for k, s in zip(map_df["LAWD_CD"], map_df["sigungu_nm"])}
 
-# 좌표형 보정
-map_df["lat"] = pd.to_numeric(map_df["lat"], errors="coerce")
-map_df["lng"] = pd.to_numeric(map_df["lng"], errors="coerce")
+def color_scale(v, vmin, vmax):
+    # 0~1 정규화 후, 연한 파랑(200,220,255) → 진한 파랑(20,60,200)로 보간
+    if v is None or np.isnan(v):
+        return [220, 220, 220, 100]  # 회색톤(데이터 없음)
+    t = (v - vmin) / (vmax - vmin)
+    t = np.clip(t, 0, 1)
+    r = int(200 + (20 - 200) * t)
+    g = int(220 + (60 - 220) * t)
+    b = int(255 + (200 - 255) * t)
+    return [r, g, b, 160]
+
+# GeoJSON 복사본에 값과 색상 주입
+sgg_joined = deepcopy(sgg)
+for ft in sgg_joined.get("features", []):
+    props = ft.get("properties", {})
+    sig_cd = str(props.get("SIG_CD", "")).zfill(5)
+    val = val_dict.get(sig_cd)
+    ntr = trades_dict.get(sig_cd, 0)
+    sido_nm = sido_dict.get(sig_cd)
+    sigungu_nm = sigungu_dict.get(sig_cd)
+    props["LAWD_CD"] = sig_cd
+    props["val"] = None if val is None or np.isnan(val) else round(val)
+    props["n_trades"] = int(ntr)
+    props["sido_nm"] = sido_nm
+    props["sigungu_nm"] = sigungu_nm
+    props["fill_color"] = color_scale(val, val_min, val_max)
+    # 툴팁용 문자열(콤마 포맷)
+    props["val_str"] = fmt_int(val)
+    props["n_trades_str"] = fmt_int(ntr)
 
 # =========================
-# 지도 렌더
+# 지도 렌더 (폴리곤)
 # =========================
 st.markdown(
     f"## 전국 실거래가 지도 — {period} · {new_old} · "
     f"{', '.join(area_band) if area_band else '전체'} · {metric}"
 )
 
-# 뷰 초기값
-if map_df["lat"].notna().any() and map_df["lng"].notna().any():
-    mid_lat = float(map_df["lat"].mean())
-    mid_lng = float(map_df["lng"].mean())
-else:
-    mid_lat, mid_lng = 36.5, 127.8  # 한국 중심 근사치
+# 전국 뷰(대략)
+mid_lat, mid_lng = 36.5, 127.8
 
-# pydeck Layer (함수 문자열 없이 컬럼명만 사용)
-layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=map_df,
-    get_position='[lng, lat]',
-    get_radius='radius',  # ← 함수 호출 금지 이슈 회피: 사전 계산 컬럼 사용
+poly_layer = pdk.Layer(
+    "GeoJsonLayer",
+    sgg_joined,
     pickable=True,
-    auto_highlight=True
+    stroked=True,
+    filled=True,
+    get_fill_color="properties.fill_color",   # JSON 함수 없이 속성 사용
+    get_line_color=[120, 120, 140, 120],
+    line_width_min_pixels=1,
 )
 
 tooltip = {
     "html": (
-        "<b>{sido_nm} {sigungu_nm}</b><br/>"
-        + f"{metric}: " + "{val}<br/>거래건수: {n_trades}"
+        "<b>{properties.sido_nm} {properties.sigungu_nm}</b><br/>"
+        + f"{metric}: " + "{properties.val_str}<br/>거래건수: {properties.n_trades_str}"
     ),
     "style": {"backgroundColor": "white", "color": "black"}
 }
 
 deck = pdk.Deck(
-    layers=[layer],
+    layers=[poly_layer],
     initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
     tooltip=tooltip
 )
 st.pydeck_chart(deck, use_container_width=True)
 
 # =========================
-# 표
+# 표 (좌표 컬럼 제외 & 콤마 포맷)
 # =========================
 st.markdown("### 상위 시군구")
-display_df = map_df.rename(columns={value_col: metric}).copy()
-display_df = display_df[["sido_nm","sigungu_nm", metric, "n_trades", "lat", "lng"]]
-display_df = display_df.sort_values(metric, ascending=False).head(30)
+
+display_df = map_df.copy()
+# 숫자 포맷된 텍스트 컬럼 추가
+display_df["표시값"] = display_df[value_col].map(fmt_int)
+display_df["거래건수"] = display_df["n_trades"].map(fmt_int)
+
+# 보여줄 컬럼만 (좌표 제외)
+display_df = display_df[["sido_nm","sigungu_nm","표시값","거래건수"]]
+display_df = display_df.sort_values("표시값", ascending=False, key=lambda s: s.str.replace(",", "").replace("-", "0").astype(int)).head(30)
+
 st.dataframe(display_df, use_container_width=True)
