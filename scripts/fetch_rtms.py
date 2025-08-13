@@ -41,17 +41,39 @@ today = datetime.today()
 date_list = [today.strftime("%Y%m")]  # 최신 1개월만
 
 # ---------------------- 기준 테이블 로딩 (문자열 5자리 통일) ----------------------
-# lawd_codes.csv
-lawd_df = pd.read_csv("lawd_codes.csv", dtype={"lawd_cd": str})
+# lawd_codes.csv : lawd_cd, sido, sigungu
+lawd_df = pd.read_csv(REF_DIR / "lawd_codes.csv",
+                      dtype={"lawd_cd": str, "sido": str, "sigungu": str})
 lawd_df["lawd_cd"] = lawd_df["lawd_cd"].str.strip().str.zfill(5)
+# 앱/집계에서 쓰는 표준 컬럼명으로 리네임
+lawd_df = lawd_df.rename(columns={
+    "lawd_cd": "LAWD_CD",
+    "sido": "sido_nm",
+    "sigungu": "sigungu_nm"
+})
 
-# sigungu_centroids.csv
-cent_df = pd.read_csv("sigungu_centroids.csv", dtype={"lawd_cd": str})
+# sigungu_centroids.csv : lawd_cd, lat, lon
+cent_df = pd.read_csv(REF_DIR / "sigungu_centroids.csv",
+                      dtype={"lawd_cd": str})
 cent_df["lawd_cd"] = cent_df["lawd_cd"].str.strip().str.zfill(5)
+# pydeck/지도에서 쓰는 표준 컬럼명(lng)으로 리네임
+cent_df = cent_df.rename(columns={
+    "lawd_cd": "LAWD_CD",
+    "lon": "lng"
+})
 
-# 조인 편의 컬럼명 정리
-lawd_df = lawd_df.rename(columns={"lawd_cd": "LAWD_CD"})
-cent_df = cent_df.rename(columns={"lawd_cd": "LAWD_CD"})
+# 누락 컬럼 대비 기본값 채우기
+for col in ["sido_nm", "sigungu_nm"]:
+    if col not in lawd_df.columns:
+        lawd_df[col] = None
+
+for col in ["lat", "lng"]:
+    if col not in cent_df.columns:
+        cent_df[col] = None
+
+# 권역 구분 컬럼이 파일에 없다면 None으로 생성(앱에서 '전국'만 먼저 테스트 가능)
+if "region_group" not in cent_df.columns:
+    cent_df["region_group"] = None
 
 # 수집 대상 코드 리스트
 lawd_list = lawd_df["LAWD_CD"].astype(str).str.zfill(5).unique().tolist()
@@ -155,10 +177,23 @@ df["new_old"] = df.apply(_new_old, axis=1)
 # m²당 가격
 df["price_per_m2"] = (df["price_krw"] / df["excluUseAr"]).round().astype("Int64")
 
-# ---------------------- 행정구역/좌표 조인 (문자열 키) ----------------------
-# 두 테이블 모두 LAWD_CD는 문자열 5자리로 통일되어 있음
-df = df.merge(lawd_df, on="LAWD_CD", how="left")   # sido_nm, sigungu_nm
-df = df.merge(cent_df, on="LAWD_CD", how="left")   # lat, lng, region_group
+# ---------------------- 행정구역/좌표 조인 ----------------------
+df = df.merge(lawd_df[["LAWD_CD","sido_nm","sigungu_nm"]],
+              on="LAWD_CD", how="left")
+df = df.merge(cent_df[["LAWD_CD","lat","lng","region_group"]],
+              on="LAWD_CD", how="left")
+
+# groupby 키가 없어서 또 터지는 일 방지
+for col, default in [
+    ("sido_nm", None),
+    ("sigungu_nm", None),
+    ("lat", None),
+    ("lng", None),
+    ("region_group", None),
+]:
+    if col not in df.columns:
+        df[col] = default
+
 
 # ---------------------- 기간 버킷 ----------------------
 now = datetime.today()
