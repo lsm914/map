@@ -42,7 +42,7 @@ date_list = [today.strftime("%Y%m")]  # 최신 1개월만
 
 # ---------------------- 기준 테이블 로딩 (문자열 5자리 통일) ----------------------
 # lawd_codes.csv : lawd_cd, sido, sigungu
-lawd_df = pd.read_csv(REF_DIR / "lawd_codes.csv",
+lawd_df = pd.read_csv("lawd_codes.csv",
                       dtype={"lawd_cd": str, "sido": str, "sigungu": str})
 lawd_df["lawd_cd"] = lawd_df["lawd_cd"].str.strip().str.zfill(5)
 # 앱/집계에서 쓰는 표준 컬럼명으로 리네임
@@ -53,7 +53,7 @@ lawd_df = lawd_df.rename(columns={
 })
 
 # sigungu_centroids.csv : lawd_cd, lat, lon
-cent_df = pd.read_csv(REF_DIR / "sigungu_centroids.csv",
+cent_df = pd.read_csv("sigungu_centroids.csv",
                       dtype={"lawd_cd": str})
 cent_df["lawd_cd"] = cent_df["lawd_cd"].str.strip().str.zfill(5)
 # pydeck/지도에서 쓰는 표준 컬럼명(lng)으로 리네임
