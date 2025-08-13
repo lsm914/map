@@ -258,11 +258,20 @@ for ft in sgg_joined.get("features", []):
 # -------------------------
 # 지도
 # -------------------------
+def format_area_band(band_list):
+    mapping = {
+        "6085": "60~85",
+        "85102": "85~102",
+        "102+": "102+",
+        "<60": "<60"
+    }
+    return [mapping.get(b, b) for b in band_list]
+
+# 제목 생성
 st.markdown(
     f"## 전국 실거래가 지도 — {period} · {new_old} · "
-    f"{', '.join(area_band) if area_band else '전체'} · {metric_label}"
+    f"{' · '.join(format_area_band(area_band)) if area_band else '전체'} · {metric_label}"
 )
-
 mid_lat, mid_lng = 36.5, 127.8  # 전국 뷰
 
 poly_layer = pdk.Layer(
