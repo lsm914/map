@@ -75,7 +75,7 @@ except Exception:
 # 시군구 경계(GeoJSON) — 로컬 → 원격
 # 기대 스키마: feature.properties.SIG_CD == 5자리 시군구 코드(= LAWD_CD)
 try:
-    sgg = load_geojson_local("ref/sgg.geojson")
+    sgg = load_geojson_local("sgg.geojson")
 except Exception:
     sgg = load_geojson_url(f"{REF_BASE}/sgg.geojson")
 
