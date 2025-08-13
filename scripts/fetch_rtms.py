@@ -38,8 +38,7 @@ if not API_KEY:
 
 # ---------------------- 기간(최근 12개월) ----------------------
 today = datetime.today()
-date_list = [(today - relativedelta(months=i)).strftime("%Y%m") for i in range(12)]
-date_list = sorted(set(date_list))  # 오래→최근
+date_list = [today.strftime("%Y%m")]  # 최신 1개월만
 
 # ---------------------- 기준 테이블 로딩 (문자열 5자리 통일) ----------------------
 # lawd_codes.csv
