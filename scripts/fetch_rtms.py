@@ -158,13 +158,21 @@ def _mk_date(r):
 df["deal_date"] = df.apply(_mk_date, axis=1)
 
 # 면적대(타입)
+# 면적대(타입)
 def _area_band(x):
-    if pd.isna(x): return None
-    if x < 60: return "<60"
-    if x < 85: return "60~85"
-    if x < 102: return "85~102"
-    return "102+"
+    if pd.isna(x):
+        return None
+    if 58 <= x <= 60:
+        return "25평형"
+    elif 73 <= x <= 75:
+        return "31평형"
+    elif 83 <= x <= 85:
+        return "35평형"
+    else:
+        return None  # 해당 구간에 안 들어가면 표시 안 함
+
 df["area_band"] = df["excluUseAr"].apply(_area_band)
+
 
 # 신축/구축 (거래연도 기준 10년 이내 → 신축)
 def _new_old(row):
