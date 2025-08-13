@@ -100,7 +100,6 @@ def load_geojson_url(url: str) -> dict:
 # 경로
 # -------------------------
 DATA_BASE = "https://raw.githubusercontent.com/lsm914/map/main/data"
-REF_BASE  = "https://raw.githubusercontent.com/lsm914/map/main/ref"
 
 # 집계 데이터 (로컬 우선, 실패 시 원격)
 try:
@@ -114,11 +113,11 @@ try:
 except Exception:
     meta = load_json_url(f"{DATA_BASE}/meta.json")
 
-# 시군구 경계 GeoJSON (로컬 → 원격)
-# 어떤 속성 키를 쓰든 간에 위 extract_sgg_code로 알아서 잡는다.
+# 시군구 경계 GeoJSON (로컬 → 원격; 필요시 경로 수정)
 try:
     sgg = load_geojson_local("sgg.geojson")
 except Exception:
+    # 배포 경로에 맞춰 변경하세요 (예: f"{REF_BASE}/sgg.geojson")
     sgg = load_geojson_url("sgg.geojson")
 
 # -------------------------
@@ -141,10 +140,9 @@ new_old = st.sidebar.radio(
     horizontal=True
 )
 
-# 평형 기준으로 선택(ETL에서 area_band가 25평형/31평형/35평형으로 채워져 있어야 함)
+# ✅ 평형 기준 선택 (ETL에서 area_band를 25/31/35평형으로 생성해야 함)
 area_choices = ["25평형","31평형","35평형"]
 area_band = st.sidebar.multiselect("평형", area_choices, default=area_choices)
-
 
 # 권역 옵션 자동 구성
 region_options = ["전국"]
@@ -169,21 +167,35 @@ metric_label = "평균 거래가(억원)"   # 표시 라벨은 억원
 value_col = "avg_price_krw"        # 내부 수치는 원단위
 
 # -------------------------
-# 필터 적용
+# 필터 적용 (지도용과 표용 분리)
 # -------------------------
 df = agg.copy()
 df = df[df["period_bucket"].eq(period)]
-if new_old != "전체":
-    df = df[df["new_old"].eq(new_old)]
-if area_band:
-    df = df[df["area_band"].isin(area_band)]
-if region_tab != "전국" and "region_group" in df.columns:
-    df = df[df["region_group"].eq(region_tab)]
 
-# 시군구 단위 대표값 (동일 시군구 다건 → 평균/합산)
+# 지도 전용 df (신축/구축 라디오 반영)
+if new_old != "전체":
+    df_map = df[df["new_old"].eq(new_old)].copy()
+else:
+    df_map = df.copy()
+
+# 표 전용 df (✅ 신축/구축 필터 제거: 전체/신축/구축을 동시에 보여주기 위함)
+df_table_src = df.copy()
+
+# 공통 필터: 평형/권역
+if area_band:
+    df_map = df_map[df_map["area_band"].isin(area_band)]
+    df_table_src = df_table_src[df_table_src["area_band"].isin(area_band)]
+
+if region_tab != "전국" and "region_group" in df.columns:
+    df_map = df_map[df_map["region_group"].eq(region_tab)]
+    df_table_src = df_table_src[df_table_src["region_group"].eq(region_tab)]
+
+# -------------------------
+# 지도용 시군구 대표값 (동일 시군구 다건 → 평균/합산)
+# -------------------------
 group_cols = ["LAWD_CD","sido_nm","sigungu_nm"]
 agg_dict = {value_col: "mean", "n_trades": "sum"}
-map_df = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+map_df = df_map.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
 
 # 숫자형 보정
 map_df[value_col] = pd.to_numeric(map_df[value_col], errors="coerce")
@@ -195,7 +207,7 @@ val_max = float(map_df[value_col].max()) if map_df[value_col].notna().any() else
 if val_min == val_max:
     val_max = val_min + 1.0
 
-# 이름 기반 백업 매칭을 위해 정규화된 이름-코드 딕셔너리 생성
+# 이름 기반 백업 매칭을 위해 정규화된 이름-코드 딕셔너리 생성 (지도 매칭 보조)
 map_df["_name_norm"] = (map_df["sido_nm"].fillna("") + map_df["sigungu_nm"].fillna("")).apply(norm_name)
 name_to_code = dict(zip(map_df["_name_norm"], map_df["LAWD_CD"]))
 
@@ -226,7 +238,7 @@ for ft in sgg_joined.get("features", []):
     # 1) 코드 기반 매칭 시도
     code = extract_sgg_code(props)
 
-    # 2) 이름 기반 백업 매칭 (시도/시군구 이름을 properties에서 찾아 정규화)
+    # 2) 이름 기반 백업 매칭
     if (code is None) or (code not in val_dict):
         sido_p = get_prop(props, ["CTP_KOR_NM","SIDO_NM","SIDO","CTPRVN_NM","CTPRVN_NM_KOR"])
         sgg_p  = get_prop(props, ["SIG_KOR_NM","SIG_NM","SIG_ENG_NM","SGG_NM","SIG_NAME"])
@@ -299,25 +311,71 @@ with st.expander("매칭 상태(디버그)"):
     st.write(f"GeoJSON 피처 수: {total_feat} | 값 매칭된 피처: {matched}")
 
 # -------------------------
-# 표 (선택 시군구만 표시 / 기본은 전체)
+# 표 (선택 시군구만 표시 / ✅ 전체·신축·구축 모두)
 # -------------------------
-st.markdown("### 시군구별 요약")
+st.markdown("### 시군구별 요약 (전체·신축·구축)")
 
-table_df = map_df.copy()
-# 선택이 있으면 그 코드만 필터
+# 1) 시군구×new_old별 가중평균(거래건수 기준) 계산
+tmp = df_table_src.copy()
+tmp = tmp[["LAWD_CD","sido_nm","sigungu_nm","new_old","avg_price_krw","n_trades"]].dropna(subset=["avg_price_krw","n_trades"])
+tmp["w_sum"] = tmp["avg_price_krw"] * tmp["n_trades"]
+
+g = (tmp
+     .groupby(["LAWD_CD","sido_nm","sigungu_nm","new_old"], dropna=False)
+     .agg(w_sum=("w_sum","sum"), n=("n_trades","sum"))
+     .reset_index())
+g["wavg"] = g["w_sum"] / g["n"]
+
+# 2) 전체(신축+구축 합) 가중평균도 계산
+all_g = (g
+         .groupby(["LAWD_CD","sido_nm","sigungu_nm"], dropna=False)
+         .agg(w_sum=("w_sum","sum"), n=("n","sum"))
+         .reset_index())
+all_g["wavg_all"] = all_g["w_sum"] / all_g["n"]
+
+# 3) 피벗으로 신축/구축 칼럼화
+pivot = g.pivot_table(index=["LAWD_CD","sido_nm","sigungu_nm"],
+                      columns="new_old", values="wavg", aggfunc="first").reset_index()
+
+# 4) 전체와 병합
+table = pivot.merge(all_g[["LAWD_CD","wavg_all","n"]], on="LAWD_CD", how="left")
+
+# 5) 컬럼 정리(라벨 표준화)
+col_new = "신축(≤10년)" if "신축(≤10년)" in table.columns else ("신축" if "신축" in table.columns else None)
+col_old = "구축(>10년)" if "구축(>10년)" in table.columns else ("구축" if "구축" in table.columns else None)
+
+rename_map = {
+    "sido_nm":"시도",
+    "sigungu_nm":"시군구",
+    "wavg_all":"전체(억원)",
+    "n":"거래건수"
+}
+if col_new: rename_map[col_new] = "신축(억원)"
+if col_old: rename_map[col_old] = "구축(억원)"
+table = table.rename(columns=rename_map)
+
+# 6) 선택 시군구가 있으면 그 코드만 필터
 if selected_labels:
     selected_codes = [str(options[label]).zfill(5) for label in selected_labels]
-    table_df = table_df[table_df["LAWD_CD"].isin(selected_codes)]
+    table = table[table["LAWD_CD"].isin(selected_codes)]
 
-# 포맷 컬럼
-table_df["평균 거래가(억원)"] = table_df[value_col].map(fmt_eok)  # 억원
-table_df["거래건수"] = table_df["n_trades"].map(fmt_int)
+# 7) 단위 변환/포맷(억원) + 정렬
+for c in ["전체(억원)","신축(억원)","구축(억원)"]:
+    if c in table.columns:
+        table[c] = table[c].map(fmt_eok)
 
-# 표시 컬럼만
-table_df = table_df[["sido_nm","sigungu_nm","평균 거래가(억원)","거래건수"]]
+table["거래건수"] = table["거래건수"].fillna(0).astype(int).map(fmt_int)
 
-# 수치 기준 정렬(내림차순)
-table_df = table_df.assign(_sort_val=pd.to_numeric(table_df["평균 거래가(억원)"].str.replace("억원","").str.replace(",",""), errors="coerce").fillna(0.0))
-table_df = table_df.sort_values("_sort_val", ascending=False).drop(columns=["_sort_val"])
+# 정렬용 보조열(전체 기준 내림차순)
+sort_vals = all_g.set_index("LAWD_CD")["wavg_all"]
+table = (table
+         .join(sort_vals.rename("_sort"), on="LAWD_CD")
+         .sort_values("_sort", ascending=False)
+         .drop(columns=["_sort","LAWD_CD"]))
 
-st.dataframe(table_df, use_container_width=True)
+st.dataframe(table[["시도","시군구"] +
+                  ([ "전체(억원)"] if "전체(억원)" in table.columns else []) +
+                  ([ "신축(억원)"] if "신축(억원)" in table.columns else []) +
+                  ([ "구축(억원)"] if "구축(억원)" in table.columns else []) +
+                  ["거래건수"]],
+             use_container_width=True)
