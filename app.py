@@ -84,9 +84,9 @@ except Exception:
 # 시군구 경계 GeoJSON (로컬 → 원격)
 # 기대 속성: feature.properties.SIG_CD == LAWD_CD(5자리)
 try:
-    sgg = load_geojson_local("ref/sgg.geojson")
+    sgg = load_geojson_local("sgg.geojson")
 except Exception:
-    sgg = load_geojson_url(f"{REF_BASE}/sgg.geojson")
+    sgg = load_geojson_url("sgg.geojson")
 
 # -------------------------
 # 사이드바
