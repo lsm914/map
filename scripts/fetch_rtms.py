@@ -42,11 +42,11 @@ date_list = [today.strftime("%Y%m")]  # 최신 1개월만
 
 # ---------------------- 기준 테이블 로딩 (문자열 5자리 통일) ----------------------
 # lawd_codes.csv
-lawd_df = pd.read_csv(REF_DIR / "lawd_codes.csv", dtype={"lawd_cd": str})
+lawd_df = pd.read_csv("lawd_codes.csv", dtype={"lawd_cd": str})
 lawd_df["lawd_cd"] = lawd_df["lawd_cd"].str.strip().str.zfill(5)
 
 # sigungu_centroids.csv
-cent_df = pd.read_csv(REF_DIR / "sigungu_centroids.csv", dtype={"lawd_cd": str})
+cent_df = pd.read_csv("sigungu_centroids.csv", dtype={"lawd_cd": str})
 cent_df["lawd_cd"] = cent_df["lawd_cd"].str.strip().str.zfill(5)
 
 # 조인 편의 컬럼명 정리
