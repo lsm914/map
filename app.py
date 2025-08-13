@@ -30,6 +30,39 @@ def fmt_int(x):
     except Exception:
         return "-"
 
+def get_prop(props, keys):
+    for k in keys:
+        if k in props and props[k] not in (None, ""):
+            return props[k]
+    return None
+
+def only_digits(s):
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+def extract_sgg_code(props):
+    """
+    GeoJSON properties에서 시군구 코드를 최대한 유연하게 찾는다.
+    - 우선순위: SIG_CD, LAWD_CD, ADM_CD, ADM_DR_CD, CODE, code, SGG_CD ...
+    - 10자리 등이면 앞 5자리만 사용(시군구 레벨).
+    """
+    cand = get_prop(props, [
+        "SIG_CD","LAWD_CD","ADM_CD","ADM_DR_CD","SGG_CD","CODE","code","sig_cd","adm_cd"
+    ])
+    if cand is None:
+        return None
+    d = only_digits(cand)
+    if len(d) >= 5:
+        return d[:5]
+    return None
+
+def norm_name(s):
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    for suf in ["시","군","구"]:
+        s = s.replace(suf, "")
+    return s.replace(" ", "")
+
 # -------------------------
 # 로더 (캐시)
 # -------------------------
@@ -82,7 +115,7 @@ except Exception:
     meta = load_json_url(f"{DATA_BASE}/meta.json")
 
 # 시군구 경계 GeoJSON (로컬 → 원격)
-# 기대 속성: feature.properties.SIG_CD == LAWD_CD(5자리)
+# 어떤 속성 키를 쓰든 간에 위 extract_sgg_code로 알아서 잡는다.
 try:
     sgg = load_geojson_local("sgg.geojson")
 except Exception:
@@ -119,7 +152,6 @@ if "region_group" in agg.columns and agg["region_group"].notna().any():
 region_tab = st.sidebar.radio("권역", region_options, index=0)
 
 # 표에 표시할 시군구 다중 선택(코드 기반으로 식별)
-# 옵션 라벨: "시도 시군구 (LAWD_CD)"
 df_for_opts = agg[["LAWD_CD","sido_nm","sigungu_nm"]].drop_duplicates()
 df_for_opts["label"] = df_for_opts.apply(
     lambda r: f"{(r['sido_nm'] or '').strip()} {(r['sigungu_nm'] or '').strip()} ({str(r['LAWD_CD']).zfill(5)})".strip(),
@@ -155,11 +187,15 @@ map_df = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
 map_df[value_col] = pd.to_numeric(map_df[value_col], errors="coerce")
 map_df["n_trades"] = pd.to_numeric(map_df["n_trades"], errors="coerce").fillna(0).astype(int)
 
-# 범례용 최소/최대 (색상 계산에는 원단위 사용)
+# 값 범위 (색상 계산용)
 val_min = float(map_df[value_col].min()) if map_df[value_col].notna().any() else 0.0
 val_max = float(map_df[value_col].max()) if map_df[value_col].notna().any() else 1.0
 if val_min == val_max:
     val_max = val_min + 1.0
+
+# 이름 기반 백업 매칭을 위해 정규화된 이름-코드 딕셔너리 생성
+map_df["_name_norm"] = (map_df["sido_nm"].fillna("") + map_df["sigungu_nm"].fillna("")).apply(norm_name)
+name_to_code = dict(zip(map_df["_name_norm"], map_df["LAWD_CD"]))
 
 # -------------------------
 # GeoJSON 주입 + 색상/툴팁 평탄화
@@ -180,23 +216,42 @@ def color_scale(v, vmin, vmax):
     return [r, g, b, 160]
 
 sgg_joined = deepcopy(sgg)
+matched = 0
+
 for ft in sgg_joined.get("features", []):
     props = ft.get("properties", {})
-    sig_cd = str(props.get("SIG_CD", "")).zfill(5)
-    val = val_dict.get(sig_cd)
-    ntr = trades_dict.get(sig_cd, 0)
-    sido_nm = sido_dict.get(sig_cd)
-    sigungu_nm = sigungu_dict.get(sig_cd)
 
-    props["LAWD_CD"] = sig_cd
+    # 1) 코드 기반 매칭 시도
+    code = extract_sgg_code(props)
+
+    # 2) 이름 기반 백업 매칭 (시도/시군구 이름을 properties에서 찾아 정규화)
+    if (code is None) or (code not in val_dict):
+        sido_p = get_prop(props, ["CTP_KOR_NM","SIDO_NM","SIDO","CTPRVN_NM","CTPRVN_NM_KOR"])
+        sgg_p  = get_prop(props, ["SIG_KOR_NM","SIG_NM","SIG_ENG_NM","SGG_NM","SIG_NAME"])
+        key_norm = norm_name((sido_p or "") + (sgg_p or ""))
+        maybe = name_to_code.get(key_norm)
+        if maybe:
+            code = str(maybe).zfill(5)
+
+    # 값 주입
+    val = val_dict.get(code)
+    ntr = trades_dict.get(code, 0)
+    sido_nm = sido_dict.get(code)
+    sigungu_nm = sigungu_dict.get(code)
+
+    if code in val_dict:
+        matched += 1
+
+    props["LAWD_CD"] = code or ""
     props["sido_nm"] = sido_nm
     props["sigungu_nm"] = sigungu_nm
-    props["val"] = None if val is None or np.isnan(val) else round(val)
-    props["n_trades"] = int(ntr)
+    props["val"] = None if (val is None or (isinstance(val, float) and np.isnan(val))) else round(val)
+    props["n_trades"] = int(ntr) if ntr is not None else 0
     props["fill_color"] = color_scale(val, val_min, val_max)
 
     # 툴팁 평탄화 & 포맷
-    props["name"] = f"{sido_nm or ''} {sigungu_nm or ''}".strip()
+    name_txt = get_prop(props, ["SIG_KOR_NM","SIG_NM","name"]) or f"{sido_nm or ''} {sigungu_nm or ''}".strip()
+    props["name"] = name_txt
     props["metric_str"] = fmt_eok(val)     # 억원 단위
     props["trades_str"] = fmt_int(ntr)
 
@@ -236,6 +291,11 @@ deck = pdk.Deck(
 )
 st.pydeck_chart(deck, use_container_width=True)
 
+# 매칭 통계(디버그용)
+with st.expander("매칭 상태(디버그)"):
+    total_feat = len(sgg_joined.get("features", []))
+    st.write(f"GeoJSON 피처 수: {total_feat} | 값 매칭된 피처: {matched}")
+
 # -------------------------
 # 표 (선택 시군구만 표시 / 기본은 전체)
 # -------------------------
@@ -255,8 +315,7 @@ table_df["거래건수"] = table_df["n_trades"].map(fmt_int)
 table_df = table_df[["sido_nm","sigungu_nm","평균 거래가(억원)","거래건수"]]
 
 # 수치 기준 정렬(내림차순)
-_sort_val = pd.to_numeric(map_df[value_col], errors="coerce").fillna(0)
-table_df = table_df.join(_sort_val.rename("_sort_val"))
+table_df = table_df.assign(_sort_val=pd.to_numeric(table_df["평균 거래가(억원)"].str.replace("억원","").str.replace(",",""), errors="coerce").fillna(0.0))
 table_df = table_df.sort_values("_sort_val", ascending=False).drop(columns=["_sort_val"])
 
 st.dataframe(table_df, use_container_width=True)
