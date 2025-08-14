@@ -117,8 +117,13 @@ except Exception:
 try:
     sgg = load_geojson_local("sgg.geojson")
 except Exception:
-    # 배포 경로에 맞춰 변경하세요 (예: f"{REF_BASE}/sgg.geojson")
     sgg = load_geojson_url("sgg.geojson")
+
+# 구분 폴리곤 GeoJSON (서울/부산/.../수도권/지방)
+try:
+    sgg_type = load_geojson_local("sgg_type.geojson")
+except Exception:
+    sgg_type = load_geojson_url("sgg_type.geojson")
 
 # -------------------------
 # 사이드바
@@ -212,7 +217,7 @@ map_df["_name_norm"] = (map_df["sido_nm"].fillna("") + map_df["sigungu_nm"].fill
 name_to_code = dict(zip(map_df["_name_norm"], map_df["LAWD_CD"]))
 
 # -------------------------
-# GeoJSON 주입 + 색상/툴팁 평탄화
+# GeoJSON 주입 + 색상/툴팁 평탄화 (시군구 지도)
 # -------------------------
 val_dict      = {str(k).zfill(5): float(v) for k, v in zip(map_df["LAWD_CD"], map_df[value_col])}
 trades_dict   = {str(k).zfill(5): int(v)   for k, v in zip(map_df["LAWD_CD"], map_df["n_trades"])}
@@ -234,10 +239,8 @@ matched = 0
 
 for ft in sgg_joined.get("features", []):
     props = ft.get("properties", {})
-
     # 1) 코드 기반 매칭 시도
     code = extract_sgg_code(props)
-
     # 2) 이름 기반 백업 매칭
     if (code is None) or (code not in val_dict):
         sido_p = get_prop(props, ["CTP_KOR_NM","SIDO_NM","SIDO","CTPRVN_NM","CTPRVN_NM_KOR"])
@@ -270,13 +273,12 @@ for ft in sgg_joined.get("features", []):
     props["trades_str"] = fmt_int(ntr)
 
 # -------------------------
-# 지도
+# 지도 ①: 시군구 경계 지도
 # -------------------------
 st.markdown(
     f"## 전국 실거래가 지도 — {period} · {new_old} · "
     f"{' · '.join(area_band) if area_band else '전체'} · {metric_label}"
 )
-
 mid_lat, mid_lng = 36.5, 127.8  # 전국 뷰
 
 poly_layer = pdk.Layer(
@@ -289,7 +291,6 @@ poly_layer = pdk.Layer(
     get_line_color=[120, 120, 140, 120],
     line_width_min_pixels=1,
 )
-
 tooltip = {
     "html": (
         "<b>{name}</b><br/>"
@@ -297,7 +298,6 @@ tooltip = {
     ),
     "style": {"backgroundColor": "white", "color": "black"}
 }
-
 deck = pdk.Deck(
     layers=[poly_layer],
     initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
@@ -305,10 +305,120 @@ deck = pdk.Deck(
 )
 st.pydeck_chart(deck, use_container_width=True)
 
-# 매칭 통계(디버그용)
 with st.expander("매칭 상태(디버그)"):
     total_feat = len(sgg_joined.get("features", []))
     st.write(f"GeoJSON 피처 수: {total_feat} | 값 매칭된 피처: {matched}")
+
+# ======================================================
+# ② 구분 지도(서울/부산/.../수도권/지방) 추가
+# ======================================================
+
+# 1) 카테고리별 LAWD_CD 목록 (사용자 제공)
+CATEGORY_CODES = {
+    "서울":  ['11110','11140','11170','11200','11215','11230','11260','11290','11305','11320','11350','11380','11410','11440','11470','11500','11530','11545','11560','11590','11620','11650','11680','11710','11740'],
+    "부산":  ['26110','26140','26170','26200','26230','26260','26290','26320','26350','26380','26410','26440','26470','26500','26530','26710'],
+    "대구":  ['27110','27140','27170','27200','27230','27260','27290','27710','27720'],
+    "인천":  ['28110','28140','28177','28185','28200','28237','28245','28260','28710','28720'],
+    "광주":  ['29110','29140','29155','29170','29200'],
+    "대전":  ['30110','30140','30170','30200','30230'],
+    "울산":  ['31110','31140','31170','31200','31710'],
+    "세종":  ['36110'],
+    "수도권":['41111','41113','41115','41117','41131','41133','41135','41150','41171','41173','41210','41220','41250','41271','41273','41281','41285','41287','41290','41310','41360','41370','41390','41410','41430','41450','41461','41463','41465','41480','41500','41550','41570','41590','41610','41630','41650','41670','41800','41820','41830','41192','41194','41196'],
+    "지방":  ['51110','51130','51150','51170','51190','51210','51230','51720','51730','51750','51760','51770','51780','51790','51800','51810','51820','51830','43130','43150','43111','43112','43113','43114','43720','43730','43740','43750','43760','43770','43800','43745','44131','44133','44150','44180','44200','44210','44230','44250','44270','44710','44760','44770','44790','44800','44810','44825','46110','46130','46150','46170','46230','46710','46720','46730','46770','46780','46790','46800','46810','46820','46830','46840','46860','46870','46880','46890','46900','46910','47111','47113','47130','47150','47170','47190','47210','47230','47250','47280','47290','47730','47750','47760','47770','47820','47830','47840','47850','47900','47920','47930','47940','48170','48220','48240','48250','48270','48310','48330','48121','48123','48125','48127','48129','48720','48730','48740','48820','48840','48850','48860','48870','48880','48890','50110','50130','52111','52113','52130','52140','52180','52190','52210','52710','52720','52730','52740','52750','52770','52790','52800'],
+}
+
+# 2) 지도에서 사용 중인 값 소스(map_df) → 카테고리 가중평균/거래건수 집계
+#    - avg_price_krw는 거래건수 기준 가중평균이 맞음
+map_core = df_map[["LAWD_CD", value_col, "n_trades"]].dropna(subset=[value_col, "n_trades"]).copy()
+map_core["LAWD_CD"] = map_core["LAWD_CD"].astype(str).str.zfill(5)
+map_core["w_sum"] = map_core[value_col] * map_core["n_trades"]
+
+cat_rows = []
+for cat, codes in CATEGORY_CODES.items():
+    codes = [str(c).zfill(5) for c in codes]
+    sub = map_core[map_core["LAWD_CD"].isin(codes)]
+    if len(sub) == 0 or sub["n_trades"].sum() == 0:
+        wavg = np.nan
+        nsum = 0
+    else:
+        wavg = sub["w_sum"].sum() / sub["n_trades"].sum()
+        nsum = int(sub["n_trades"].sum())
+    cat_rows.append({"category": cat, "wavg": wavg, "n_trades": nsum})
+
+cat_df = pd.DataFrame(cat_rows)
+
+# 3) 구분 GeoJSON에 값 주입(이름 매칭; name/type/label 등 유연 매칭)
+def extract_type_name(props):
+    return get_prop(props, ["name","NAME","type","TYPE","label","LABEL","sgg_type","SGG_TYPE"])
+
+# 색상 스케일(카테고리 값 기준)
+cat_vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
+cat_vmax = float(cat_df["wavg"].max()) if cat_df["wavg"].notna().any() else 1.0
+if cat_vmin == cat_vmax:
+    cat_vmax = cat_vmin + 1.0
+
+def color_scale_cat(v, vmin, vmax):
+    if v is None or np.isnan(v):
+        return [220, 220, 220, 100]
+    t = (v - vmin) / (vmax - vmin)
+    t = np.clip(t, 0, 1)
+    r = int(240 + (30 - 240) * t)   # 연핑크 → 보라 계열 예시
+    g = int(220 + (70 - 220) * t)
+    b = int(240 + (180 - 240) * t)
+    return [r, g, b, 160]
+
+cat_value = dict(zip(cat_df["category"], cat_df["wavg"]))
+cat_trades = dict(zip(cat_df["category"], cat_df["n_trades"]))
+
+sgg_type_joined = deepcopy(sgg_type)
+matched_cat = 0
+for ft in sgg_type_joined.get("features", []):
+    props = ft.get("properties", {}) or {}
+    nm = extract_type_name(props)
+    if nm in cat_value:
+        v = cat_value[nm]
+        n = cat_trades.get(nm, 0)
+        matched_cat += 1
+    else:
+        v, n = np.nan, 0
+
+    props["group_name"] = nm or ""
+    props["val"] = None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+    props["val_str"] = fmt_eok(v)
+    props["n_trades"] = int(n)
+    props["n_trades_str"] = fmt_int(n)
+    props["fill_color"] = color_scale_cat(v, cat_vmin, cat_vmax)
+
+# 4) 구분 지도 렌더
+st.markdown("## 구분 지도 — 서울·부산·대구·인천·광주·대전·울산·세종·수도권·지방")
+
+type_layer = pdk.Layer(
+    "GeoJsonLayer",
+    sgg_type_joined,
+    pickable=True,
+    stroked=True,
+    filled=True,
+    get_fill_color="properties.fill_color",
+    get_line_color=[100, 100, 120, 140],
+    line_width_min_pixels=1.5,
+)
+
+type_tooltip = {
+    "html": "<b>{group_name}</b><br/>"
+            + f"{metric_label}: " + "{val_str}<br/>거래건수: {n_trades_str}",
+    "style": {"backgroundColor": "white", "color": "black"}
+}
+
+type_deck = pdk.Deck(
+    layers=[type_layer],
+    initial_view_state=pdk.ViewState(latitude=36.5, longitude=127.8, zoom=6),
+    tooltip=type_tooltip
+)
+st.pydeck_chart(type_deck, use_container_width=True)
+
+with st.expander("구분 매칭 상태(디버그)"):
+    total_feat2 = len(sgg_type_joined.get("features", []))
+    st.write(f"구분 폴리곤 수: {total_feat2} | 값 매칭된 구분: {matched_cat}")
 
 # -------------------------
 # 표 (선택 시군구만 표시 / ✅ 전체·신축·구축 모두)
