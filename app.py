@@ -63,36 +63,76 @@ def norm_name(s):
         s = s.replace(suf, "")
     return s.replace(" ", "")
 
-# --- 카테고리명 표준화(구분 지도용) ---
+# --- 카테고리명 표준화(구분 지도용; 한글/영문/별칭 폭넓게 대응) ---
 def normalize_category_name(s: str) -> str:
     if s is None:
         return ""
     s = str(s).strip()
-    # 접미어 제거/공백 제거
-    s = (s
-         .replace("특별자치시", "")
-         .replace("광역시", "")
-         .replace("특별시", "")
-         .replace(" ", ""))
-    # 대표명 매핑
+    # 흔한 구분/기호 제거
+    for tok in ["특별자치시","광역시","특별시"," ", "·", "-", "_"]:
+        s = s.replace(tok, "")
+    # 영문 별칭 매핑(전부 소문자로 비교)
+    low = s.lower()
+    eng_alias = {
+        "seoul": "서울",
+        "busan": "부산",
+        "daegu": "대구",
+        "incheon": "인천",
+        "gwangju": "광주",
+        "daejeon": "대전",
+        "ulsan": "울산",
+        "sejong": "세종",
+        "capitalregion": "수도권",
+        "capitalarea": "수도권",
+        "metropolitanarea": "수도권",
+        "gyeonggi": "수도권",
+        "gyeonggido": "수도권",
+        "gg": "수도권",
+        "noncapital": "지방",
+        "others": "지방",
+        "regions": "지방",
+    }
+    if low in eng_alias:
+        return eng_alias[low]
+    # 한글 별칭 통일
     alias = {
-        "서울": "서울", "서울시": "서울",
-        "부산": "부산",
-        "대구": "대구",
-        "인천": "인천",
-        "광주": "광주",
-        "대전": "대전",
-        "울산": "울산",
-        "세종": "세종",
-        "수도권": "수도권",
-        "지방": "지방",
+        "서울":"서울","서울시":"서울","서울특별시":"서울",
+        "부산":"부산","부산시":"부산","부산광역시":"부산",
+        "대구":"대구","대구시":"대구","대구광역시":"대구",
+        "인천":"인천","인천시":"인천","인천광역시":"인천",
+        "광주":"광주","광주시":"광주","광주광역시":"광주",
+        "대전":"대전","대전시":"대전","대전광역시":"대전",
+        "울산":"울산","울산시":"울산","울산광역시":"울산",
+        "세종":"세종","세종시":"세종","세종특별자치시":"세종",
+        # 수도권/지방
+        "수도권":"수도권","경기도":"수도권","경기":"수도권",
+        "지방":"지방",
     }
     return alias.get(s, s)
 
 def extract_type_name(props: dict) -> str:
-    # sgg_type.geojson 안에서 쓸만한 속성 탐색 후 표준화
-    cand = get_prop(props, ["name","NAME","type","TYPE","label","LABEL","sgg_type","SGG_TYPE"])
-    return normalize_category_name(cand)
+    """
+    sgg_type.geojson의 properties에서 카테고리 이름을 robust하게 추출
+    1) 다양한 후보 키를 우선 탐색
+    2) 없으면 문자열 속성 중 가장 길이가 긴 값을 선택 (폴백)
+    3) 최종적으로 normalize_category_name으로 표준화
+    """
+    keys = [
+        "name","NAME","Name","type","TYPE","label","LABEL",
+        "sgg_type","SGG_TYPE","adm_nm","ADM_NM","adm_name","ADM_NAME",
+        "sigungu","SIGUNGU","sido","SIDO","region","REGION",
+        "group","GROUP","cat","CAT","category","CATEGORY"
+    ]
+    cand = get_prop(props, keys)
+    if cand:
+        return normalize_category_name(cand)
+
+    texts = [str(v) for v in (props or {}).values() if isinstance(v, str)]
+    if texts:
+        texts.sort(key=len, reverse=True)
+        return normalize_category_name(texts[0])
+
+    return ""
 
 # -------------------------
 # 로더 (캐시)
@@ -304,19 +344,14 @@ for ft in sgg_joined.get("features", []):
 
 # -------------------------
 # ② 구분 지도 준비(서울/부산/.../수도권/지방)
-#   └ 값 안 뜨는 문제 방지: map_df(시군구 단위로 이미 집계된 데이터)를 다시 집계
+#   └ 시군구 집계(map_df) 기반으로 카테고리 가중평균(거래건수 가중)
 # -------------------------
-# -------------------------
-# ② 구분 지도 준비(서울/부산/.../수도권/지방)
-#   └ 정적 코드리스트 대신 LAWD_CD 앞 2자리로 동적 분류
-# -------------------------
-
-# 시군구 단위로 이미 집계된 map_df에서 다시 카테고리 가중평균 계산
+# 시군구 단위로 이미 집계된 map_df에서 다시 카테고리 가중평균을 계산
 map_core = map_df[["LAWD_CD", value_col, "n_trades"]].dropna(subset=[value_col, "n_trades"]).copy()
 map_core["LAWD_CD"] = map_core["LAWD_CD"].astype(str).str.zfill(5)
 map_core["w_sum"] = map_core[value_col] * map_core["n_trades"]
 
-# 앞 2자리 -> 카테고리 매핑
+# 앞 2자리 -> 카테고리 매핑 (광역단위/수도권/지방 자동 판정)
 def lawd_to_category(lawd_cd: str) -> str:
     p2 = str(lawd_cd)[:2]
     if p2 == "11": return "서울"
@@ -380,40 +415,15 @@ for ft in sgg_type_joined.get("features", []):
     props["n_trades_str"] = fmt_int(n)
     props["fill_color"] = color_scale_cat(v, cat_vmin, cat_vmax)
 
-
-# 색상 스케일(구분 지도용)
-cat_vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
-cat_vmax = float(cat_df["wavg"].max()) if cat_df["wavg"].notna().any() else 1.0
-if cat_vmin == cat_vmax:
-    cat_vmax = cat_vmin + 1.0
-
-def color_scale_cat(v, vmin, vmax):
-    if v is None or np.isnan(v):
-        return [220, 220, 220, 100]
-    t = (v - vmin) / (vmax - vmin)
-    t = np.clip(t, 0, 1)
-    r = int(240 + (30 - 240) * t)   # 연핑크 → 보라 계열
-    g = int(220 + (70 - 220) * t)
-    b = int(240 + (180 - 240) * t)
-    return [r, g, b, 160]
-
-sgg_type_joined = deepcopy(sgg_type)
-matched_cat = 0
-for ft in sgg_type_joined.get("features", []):
+# ---- 디버그: sgg_type 안의 이름이 무엇으로 읽히는지 확인 ----
+detected = []
+for ft in sgg_type.get("features", []):
     props = ft.get("properties", {}) or {}
-    nm = extract_type_name(props)  # 표준화된 카테고리명
-    if nm in cat_value:
-        v = cat_value[nm]
-        n = cat_trades.get(nm, 0)
-        matched_cat += 1
-    else:
-        v, n = np.nan, 0
-    props["group_name"] = nm or ""
-    props["val"] = None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
-    props["val_str"] = fmt_eok(v)
-    props["n_trades"] = int(n)
-    props["n_trades_str"] = fmt_int(n)
-    props["fill_color"] = color_scale_cat(v, cat_vmin, cat_vmax)
+    nm = extract_type_name(props)
+    # 원시 속성 일부 샘플
+    sample = {k: props.get(k) for k in list(props.keys())[:8]}
+    detected.append({"detected_name": nm, "has_value": nm in cat_value, "raw_props_sample": sample})
+debug_df = pd.DataFrame(detected).drop_duplicates("detected_name")
 
 # -------------------------
 # 두 지도를 좌우로 배치
@@ -444,7 +454,7 @@ with left:
         }
     )
     st.pydeck_chart(deck, use_container_width=True)
-    with st.expander("매칭 상태(디버그)"):
+    with st.expander("시군구 매칭 상태(디버그)"):
         total_feat = len(sgg_joined.get("features", []))
         st.write(f"GeoJSON 피처 수: {total_feat} | 값 매칭된 피처: {matched}")
 
@@ -472,19 +482,8 @@ with right:
     with st.expander("구분 매칭 상태(디버그)"):
         total_feat2 = len(sgg_type_joined.get("features", []))
         st.write(f"구분 폴리곤 수: {total_feat2} | 값 매칭된 구분: {matched_cat}")
-        # 미매칭 이름 출력
-        unmatched = []
-        for ft in sgg_type_joined.get("features", []):
-            nm = extract_type_name(ft.get("properties", {}) or {})
-            if nm not in cat_value:
-                unmatched.append(nm)
-        if unmatched:
-            st.write("미매칭 구분:", sorted(set([x for x in unmatched if x])))
-
-# 구분 집계 디버그(데이터 유무)
-with st.expander("구분 집계 디버그(데이터 유무 확인)"):
-    st.write("map_df 행수:", len(map_df))
-    st.write(cat_df.assign(억원=cat_df["wavg"].map(fmt_eok)))
+        st.write("cat_df(집계):", cat_df.assign(억원=cat_df["wavg"].map(fmt_eok)))
+        st.write("sgg_type에서 읽힌 이름:", debug_df)
 
 # -------------------------
 # 표 (선택 시군구만 표시 / ✅ 전체·신축·구축 모두)
