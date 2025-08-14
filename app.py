@@ -306,40 +306,80 @@ for ft in sgg_joined.get("features", []):
 # ② 구분 지도 준비(서울/부산/.../수도권/지방)
 #   └ 값 안 뜨는 문제 방지: map_df(시군구 단위로 이미 집계된 데이터)를 다시 집계
 # -------------------------
-CATEGORY_CODES = {
-    "서울":  ['11110','11140','11170','11200','11215','11230','11260','11290','11305','11320','11350','11380','11410','11440','11470','11500','11530','11545','11560','11590','11620','11650','11680','11710','11740'],
-    "부산":  ['26110','26140','26170','26200','26230','26260','26290','26320','26350','26380','26410','26440','26470','26500','26530','26710'],
-    "대구":  ['27110','27140','27170','27200','27230','27260','27290','27710','27720'],
-    "인천":  ['28110','28140','28177','28185','28200','28237','28245','28260','28710','28720'],
-    "광주":  ['29110','29140','29155','29170','29200'],
-    "대전":  ['30110','30140','30170','30200','30230'],
-    "울산":  ['31110','31140','31170','31200','31710'],
-    "세종":  ['36110'],
-    "수도권":['41111','41113','41115','41117','41131','41133','41135','41150','41171','41173','41210','41220','41250','41271','41273','41281','41285','41287','41290','41310','41360','41370','41390','41410','41430','41450','41461','41463','41465','41480','41500','41550','41570','41590','41610','41630','41650','41670','41800','41820','41830','41192','41194','41196'],
-    "지방":  ['51110','51130','51150','51170','51190','51210','51230','51720','51730','51750','51760','51770','51780','51790','51800','51810','51820','51830','43130','43150','43111','43112','43113','43114','43720','43730','43740','43750','43760','43770','43800','43745','44131','44133','44150','44180','44200','44210','44230','44250','44270','44710','44760','44770','44790','44800','44810','44825','46110','46130','46150','46170','46230','46710','46720','46730','46770','46780','46790','46800','46810','46820','46830','46840','46860','46870','46880','46890','46900','46910','47111','47113','47130','47150','47170','47190','47210','47230','47250','47280','47290','47730','47750','47760','47770','47820','47830','47840','47850','47900','47920','47930','47940','48170','48220','48240','48250','48270','48310','48330','48121','48123','48125','48127','48129','48720','48730','48740','48820','48840','48850','48860','48870','48880','48890','50110','50130','52111','52113','52130','52140','52180','52190','52210','52710','52720','52730','52740','52750','52770','52790','52800'],
-}
+# -------------------------
+# ② 구분 지도 준비(서울/부산/.../수도권/지방)
+#   └ 정적 코드리스트 대신 LAWD_CD 앞 2자리로 동적 분류
+# -------------------------
 
-# ✅ 시군구 단위로 이미 집계된 map_df에서 다시 카테고리 가중평균을 계산
+# 시군구 단위로 이미 집계된 map_df에서 다시 카테고리 가중평균 계산
 map_core = map_df[["LAWD_CD", value_col, "n_trades"]].dropna(subset=[value_col, "n_trades"]).copy()
 map_core["LAWD_CD"] = map_core["LAWD_CD"].astype(str).str.zfill(5)
 map_core["w_sum"] = map_core[value_col] * map_core["n_trades"]
 
-cat_rows = []
-for cat, codes in CATEGORY_CODES.items():
-    codes = [str(c).zfill(5) for c in codes]
-    sub = map_core[map_core["LAWD_CD"].isin(codes)]
-    if len(sub) == 0 or sub["n_trades"].sum() == 0:
-        wavg = np.nan
-        nsum = 0
-    else:
-        wavg = sub["w_sum"].sum() / sub["n_trades"].sum()
-        nsum = int(sub["n_trades"].sum())
-    cat_rows.append({"category": cat, "wavg": wavg, "n_trades": nsum})
+# 앞 2자리 -> 카테고리 매핑
+def lawd_to_category(lawd_cd: str) -> str:
+    p2 = str(lawd_cd)[:2]
+    if p2 == "11": return "서울"
+    if p2 == "26": return "부산"
+    if p2 == "27": return "대구"
+    if p2 == "28": return "인천"
+    if p2 == "29": return "광주"
+    if p2 == "30": return "대전"
+    if p2 == "31": return "울산"
+    if p2 == "36": return "세종"
+    if p2 == "41": return "수도권"   # 경기도는 '수도권'으로 묶기
+    return "지방"                    # 나머지는 '지방'
 
-cat_df = pd.DataFrame(cat_rows)
+map_core["category"] = map_core["LAWD_CD"].map(lawd_to_category)
+
+# 카테고리별 가중평균(거래건수 가중)
+cat_df = (
+    map_core.groupby("category", dropna=False)
+            .agg(w_sum=("w_sum", "sum"), n_trades=("n_trades", "sum"))
+            .reset_index()
+)
+cat_df["wavg"] = np.where(cat_df["n_trades"] > 0, cat_df["w_sum"] / cat_df["n_trades"], np.nan)
+
+# GeoJSON 속성명과 안전 매칭(서울특별시 → 서울 등)
 cat_df["category_norm"] = cat_df["category"].map(normalize_category_name)
 cat_value  = dict(zip(cat_df["category_norm"], cat_df["wavg"]))
 cat_trades = dict(zip(cat_df["category_norm"], cat_df["n_trades"]))
+
+# 색상 스케일(구분 지도용)
+cat_vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
+cat_vmax = float(cat_df["wavg"].max()) if cat_df["wavg"].notna().any() else 1.0
+if cat_vmin == cat_vmax:
+    cat_vmax = cat_vmin + 1.0
+
+def color_scale_cat(v, vmin, vmax):
+    if v is None or np.isnan(v):
+        return [220, 220, 220, 100]
+    t = (v - vmin) / (vmax - vmin)
+    t = np.clip(t, 0, 1)
+    r = int(240 + (30 - 240) * t)   # 연핑크 → 보라 계열
+    g = int(220 + (70 - 220) * t)
+    b = int(240 + (180 - 240) * t)
+    return [r, g, b, 160]
+
+# sgg_type.geojson에 값 주입
+sgg_type_joined = deepcopy(sgg_type)
+matched_cat = 0
+for ft in sgg_type_joined.get("features", []):
+    props = ft.get("properties", {}) or {}
+    nm = extract_type_name(props)  # 표준화된 카테고리명(서울/부산/…/수도권/지방)
+    if nm in cat_value:
+        v = cat_value[nm]
+        n = cat_trades.get(nm, 0)
+        matched_cat += 1
+    else:
+        v, n = np.nan, 0
+    props["group_name"] = nm or ""
+    props["val"] = None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+    props["val_str"] = fmt_eok(v)
+    props["n_trades"] = int(n)
+    props["n_trades_str"] = fmt_int(n)
+    props["fill_color"] = color_scale_cat(v, cat_vmin, cat_vmax)
+
 
 # 색상 스케일(구분 지도용)
 cat_vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
