@@ -1,8 +1,9 @@
 name: Fetch RTMS and Build Aggregates
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 수동으로도 실행 가능
   schedule:
-    - cron: "20 18 * * *"  # 매일 03:20 KST(=18:20 UTC) 근처
+    # 매주 월요일 01:00 KST (UTC 16:00) 실행
+    - cron: "0 16 * * 1"   # 월요일 UTC 기준 16:00 (KST 01:00)
 
 jobs:
   etl:
