@@ -6,6 +6,7 @@ import numpy as np
 import json
 from urllib.request import urlopen
 from io import BytesIO
+import os
 
 st.set_page_config(page_title="전국 아파트 실거래가 비교", layout="wide")
 
@@ -43,9 +44,14 @@ def load_json_url(url: str) -> dict:
         return json.loads(f.read().decode("utf-8"))
 
 @st.cache_data(ttl=86400)
-def load_geojson_url(url: str) -> dict:
-    with urlopen(url) as f:
-        return json.loads(f.read().decode("utf-8"))
+def load_geojson(path_or_url: str) -> dict:
+    """로컬/URL 모두 지원"""
+    if path_or_url.startswith("http"):
+        with urlopen(path_or_url) as f:
+            return json.loads(f.read().decode("utf-8"))
+    else:
+        with open(path_or_url, "r", encoding="utf-8") as f:
+            return json.load(f)
 
 # =========================
 # 데이터 경로
@@ -54,8 +60,17 @@ DATA_BASE = "https://raw.githubusercontent.com/lsm914/map/main/data"
 
 agg = load_parquet_url(f"{DATA_BASE}/agg_sigungu.parquet")
 meta = load_json_url(f"{DATA_BASE}/meta.json")
-sgg = load_geojson_url("sgg.geojson")
-sgg_type = load_geojson_url("sgg_type.geojson")
+
+# GeoJSON은 로컬 우선, 실패시 원격 fallback
+try:
+    sgg = load_geojson("sgg.geojson")
+except:
+    sgg = load_geojson(f"{DATA_BASE}/sgg.geojson")
+
+try:
+    sgg_type = load_geojson("sgg_type.geojson")
+except:
+    sgg_type = load_geojson(f"{DATA_BASE}/sgg_type.geojson")
 
 # =========================
 # 사이드바
@@ -94,7 +109,6 @@ def filter_and_aggregate(agg, period, area_band, region_tab):
 
 base = filter_and_aggregate(agg, period, area_band, region_tab)
 
-# 시군구별 집계
 def agg_by_sigungu(df_in, new_old=None):
     d = df_in.copy()
     if new_old:
@@ -133,7 +147,7 @@ with left:
         layers=[
             pdk.Layer(
                 "GeoJsonLayer",
-                sgg,   # 원본 그대로
+                sgg,
                 pickable=True,
                 stroked=True,
                 filled=True,
@@ -153,7 +167,7 @@ with left:
     )
     st.pydeck_chart(deck_left, use_container_width=True)
 
-# 오른쪽: 구분 지도 (sgg_type)
+# 오른쪽: 구분 지도
 with right:
     st.markdown("#### 구분 지도")
     deck_right = pdk.Deck(
@@ -181,7 +195,7 @@ with right:
     st.pydeck_chart(deck_right, use_container_width=True)
 
 # =========================
-# 표 (간단)
+# 표
 # =========================
 st.markdown("### 시군구별 요약")
 st.dataframe(map_selected, use_container_width=True)
