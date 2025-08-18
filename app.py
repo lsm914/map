@@ -186,8 +186,8 @@ if "region_group" in agg.columns and agg["region_group"].notna().any():
     region_options += sorted([x for x in agg["region_group"].dropna().unique().tolist() if x])
 region_tab = st.sidebar.radio("권역", region_options, index=0)
 
-# 구분지도 값 기준(전체/신축/구축)
-cat_value_mode = st.sidebar.selectbox("구분 지도 값 기준", ["전체","신축(≤10년)","구축(>10년)"], index=0)
+# ★ 지도 두 개 모두에 적용될 기준(전체/신축/구축)
+cat_value_mode = st.sidebar.selectbox("지도 값 기준", ["전체","신축(≤10년)","구축(>10년)"], index=0)
 
 # 표 시군구 선택
 df_for_opts = agg[["LAWD_CD","sido_nm","sigungu_nm"]].drop_duplicates()
@@ -241,22 +241,20 @@ def build_map_df_all_new_old(df_base: pd.DataFrame):
     """전체/신축/구축 3종 집계 반환"""
     # 전체(가중평균)
     map_all = agg_by_sigungu_weighted(df_base)
-
     # 신축/구축 별도
     map_new = agg_by_sigungu( df_base[df_base["new_old"].eq("신축(≤10년)")] )
     map_old = agg_by_sigungu( df_base[df_base["new_old"].eq("구축(>10년)")] )
-
     return map_all, map_new, map_old
 
 def inject_to_sgg(geojson_obj: dict, map_df: pd.DataFrame, vmin: float, vmax: float):
     """시군구 GeoJSON에 값/색상/툴팁 주입"""
-    vals = {str(k).zfill(5): float(v) for k, v in zip(map_df["LAWD_CD"], map_df["avg_price_krw"])}
+    vals = {str(k).zfill(5): float(v) for k, v in zip(map_df["LAWD_CD"], map_df["avg_price_krw"]) if pd.notna(v)}
     cnts = {str(k).zfill(5): int(v)   for k, v in zip(map_df["LAWD_CD"], map_df["n_trades"])}
     sidos= {str(k).zfill(5): s        for k, s in zip(map_df["LAWD_CD"], map_df["sido_nm"])}
     sggs = {str(k).zfill(5): s        for k, s in zip(map_df["LAWD_CD"], map_df["sigungu_nm"])}
 
     def color_scale(v, vmin, vmax):
-        if v is None or np.isnan(v):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
             return [220,220,220,100]
         t = (v - vmin) / (vmax - vmin)
         t = np.clip(t, 0, 1)
@@ -367,62 +365,62 @@ sgg_all = inject_to_sgg(sgg, map_all, vmin_all, vmax_all)
 sgg_new = inject_to_sgg(sgg, map_new, vmin_new, vmax_new)
 sgg_old = inject_to_sgg(sgg, map_old, vmin_old, vmax_old)
 
-# 구분 지도용 집계 소스 선택(전체/신축/구축)
+# 구분 지도용 집계 소스 선택(전체/신축/구축) — ★ 두 지도 공통 기준
 cat_source = {"전체": map_all, "신축(≤10년)": map_new, "구축(>10년)": map_old}[cat_value_mode]
 cat_df = build_cat_df_from_map(cat_source)
 sgg_type_joined = inject_to_sgg_type(sgg_type, cat_df)
 
 # =========================
-# 레이아웃: 시군구 지도(탭) + 구분 지도
+# 레이아웃: 좌우 지도 (시군구 / 구분)
 # =========================
-st.markdown("## 시군구 지도")
-tabs = st.tabs(["전체", "신축(≤10년)", "구축(>10년)"])
+st.markdown(f"## 지도 — 기준: {cat_value_mode}")
+
+left, right = st.columns(2)
 mid_lat, mid_lng = 36.5, 127.8
 
-with tabs[0]:
-    deck = pdk.Deck(
-        layers=[pdk.Layer("GeoJsonLayer", sgg_all, pickable=True, stroked=True, filled=True,
-                          get_fill_color="properties.fill_color",
-                          get_line_color=[120,120,140,120], line_width_min_pixels=1)],
+# 왼쪽: 시군구 지도 (선택 모드 적용)
+with left:
+    st.markdown("#### 시군구 지도")
+    if cat_value_mode == "전체":
+        geo_src = sgg_all
+        tip_label = "평균 거래가"
+    elif cat_value_mode == "신축(≤10년)":
+        geo_src = sgg_new
+        tip_label = "신축 평균"
+    else:
+        geo_src = sgg_old
+        tip_label = "구축 평균"
+
+    deck_left = pdk.Deck(
+        layers=[pdk.Layer(
+            "GeoJsonLayer",
+            geo_src,
+            pickable=True, stroked=True, filled=True,
+            get_fill_color="properties.fill_color",
+            get_line_color=[120,120,140,120],
+            line_width_min_pixels=1)],
         initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-        tooltip={"html": "<b>{name}</b><br/>평균 거래가: {metric_str}<br/>거래건수: {trades_str}",
+        tooltip={"html": f"<b>{{name}}</b><br/>{tip_label}: {{metric_str}}<br/>거래건수: {{trades_str}}",
                  "style":{"backgroundColor":"white","color":"black"}}
     )
-    st.pydeck_chart(deck, use_container_width=True)
+    st.pydeck_chart(deck_left, use_container_width=True)
 
-with tabs[1]:
-    deck = pdk.Deck(
-        layers=[pdk.Layer("GeoJsonLayer", sgg_new, pickable=True, stroked=True, filled=True,
-                          get_fill_color="properties.fill_color",
-                          get_line_color=[120,120,140,120], line_width_min_pixels=1)],
+# 오른쪽: 구분 지도 (같은 기준 적용)
+with right:
+    st.markdown(f"#### 구분 지도")
+    deck_right = pdk.Deck(
+        layers=[pdk.Layer(
+            "GeoJsonLayer",
+            sgg_type_joined,
+            pickable=True, stroked=True, filled=True,
+            get_fill_color="properties.fill_color",
+            get_line_color=[100,100,120,140],
+            line_width_min_pixels=1.5)],
         initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-        tooltip={"html": "<b>{name}</b><br/>신축 평균: {metric_str}<br/>거래건수: {trades_str}",
+        tooltip={"html": "<b>{group_name}</b><br/>평균 거래가: {val_str}<br/>거래건수: {n_trades_str}",
                  "style":{"backgroundColor":"white","color":"black"}}
     )
-    st.pydeck_chart(deck, use_container_width=True)
-
-with tabs[2]:
-    deck = pdk.Deck(
-        layers=[pdk.Layer("GeoJsonLayer", sgg_old, pickable=True, stroked=True, filled=True,
-                          get_fill_color="properties.fill_color",
-                          get_line_color=[120,120,140,120], line_width_min_pixels=1)],
-        initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-        tooltip={"html": "<b>{name}</b><br/>구축 평균: {metric_str}<br/>거래건수: {trades_str}",
-                 "style":{"backgroundColor":"white","color":"black"}}
-    )
-    st.pydeck_chart(deck, use_container_width=True)
-
-# 구분 지도
-st.markdown(f"## 구분 지도 — 기준: {cat_value_mode}")
-type_deck = pdk.Deck(
-    layers=[pdk.Layer("GeoJsonLayer", sgg_type_joined, pickable=True, stroked=True, filled=True,
-                      get_fill_color="properties.fill_color",
-                      get_line_color=[100,100,120,140], line_width_min_pixels=1.5)],
-    initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-    tooltip={"html": "<b>{group_name}</b><br/>평균 거래가: {val_str}<br/>거래건수: {n_trades_str}",
-             "style":{"backgroundColor":"white","color":"black"}}
-)
-st.pydeck_chart(type_deck, use_container_width=True)
+    st.pydeck_chart(deck_right, use_container_width=True)
 
 # =========================
 # 표: 전체·신축·구축 모두 보여주기
