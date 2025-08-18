@@ -378,7 +378,7 @@ st.markdown(f"## 지도 — 기준: {cat_value_mode}")
 left, right = st.columns(2)
 mid_lat, mid_lng = 36.5, 127.8
 
-# 왼쪽: 시군구 지도 (선택 모드 적용)
+# 왼쪽: 시군구 지도 (cat_value_mode를 그대로 적용)
 with left:
     st.markdown("#### 시군구 지도")
     if cat_value_mode == "전체":
@@ -407,7 +407,7 @@ with left:
 
 # 오른쪽: 구분 지도 (같은 기준 적용)
 with right:
-    st.markdown(f"#### 구분 지도")
+    st.markdown("#### 구분 지도")
     deck_right = pdk.Deck(
         layers=[pdk.Layer(
             "GeoJsonLayer",
