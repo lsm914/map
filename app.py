@@ -479,3 +479,47 @@ st.dataframe(
           + ["거래건수"]],
     use_container_width=True
 )
+
+# =========================
+# 표: 권역(서울·부산·…·수도권·지방) 요약 추가
+# =========================
+st.markdown("### 권역별 요약 (전체·신축·구축)")
+
+def build_category_table(map_all_df: pd.DataFrame, map_new_df: pd.DataFrame, map_old_df: pd.DataFrame) -> pd.DataFrame:
+    # 각 지도용 집계에서 권역별 가중평균(= wavg)과 거래건수 집계
+    cat_all = build_cat_df_from_map(map_all_df)[["category_norm","wavg","n_trades"]].rename(
+        columns={"wavg":"전체(억원)_raw","n_trades":"거래건수"}
+    )
+    cat_new = build_cat_df_from_map(map_new_df)[["category_norm","wavg"]].rename(
+        columns={"wavg":"신축(억원)_raw"}
+    )
+    cat_old = build_cat_df_from_map(map_old_df)[["category_norm","wavg"]].rename(
+        columns={"wavg":"구축(억원)_raw"}
+    )
+
+    out = cat_all.merge(cat_new, on="category_norm", how="outer").merge(cat_old, on="category_norm", how="outer")
+
+    # 표시용 컬럼 만들기(억원 포맷)
+    for c in ["전체(억원)_raw","신축(억원)_raw","구축(억원)_raw"]:
+        if c in out.columns:
+            out[c.replace("_raw","")] = out[c].map(fmt_eok)
+
+    out["권역"] = out["category_norm"].fillna("")
+    # 표시 순서 고정
+    order = ["서울","부산","대구","인천","광주","대전","울산","세종","수도권","지방"]
+    out["__order__"] = out["권역"].apply(lambda x: order.index(x) if x in order else 999)
+
+    # 거래건수 포맷
+    out["거래건수"] = out["거래건수"].fillna(0).astype(int).map(fmt_int)
+
+    cols_show = ["권역"] \
+        + (["전체(억원)"] if "전체(억원)" in out.columns else []) \
+        + (["신축(억원)"] if "신축(억원)" in out.columns else []) \
+        + (["구축(억원)"] if "구축(억원)" in out.columns else []) \
+        + ["거래건수"]
+
+    out = out.sort_values("__order__").drop(columns=[c for c in out.columns if c.endswith("_raw")] + ["__order__","category_norm"])
+    return out[cols_show]
+
+cat_table = build_category_table(map_all, map_new, map_old)
+st.dataframe(cat_table, use_container_width=True)
