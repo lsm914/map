@@ -97,6 +97,20 @@ def extract_type_name(props: dict) -> str:
         return normalize_category_name(texts[0])
     return ""
 
+def lawd_to_category(lawd_cd: str) -> str:
+    """LAWD_CD → 권역명(서울/부산/…/수도권/지방)"""
+    p2 = str(lawd_cd)[:2]
+    if p2 == "11": return "서울"
+    if p2 == "26": return "부산"
+    if p2 == "27": return "대구"
+    if p2 == "28": return "인천"
+    if p2 == "29": return "광주"
+    if p2 == "30": return "대전"
+    if p2 == "31": return "울산"
+    if p2 == "36": return "세종"
+    if p2 == "41": return "수도권"
+    return "지방"
+
 # =========================
 # 로더 (캐시)
 # =========================
@@ -285,10 +299,42 @@ def build_ageband_by_sigungu(df: pd.DataFrame):
         }
     return out
 
+def build_ageband_by_category(df: pd.DataFrame):
+    """권역(정규화명)별 연차 구간 평균가(억원 문자열) dict 생성"""
+    if df.empty:
+        return {}
+    age_years = ensure_age_years_from_trades(df)
+    t = (df.assign(__age_years__=pd.to_numeric(age_years, errors="coerce"))
+           .dropna(subset=["__age_years__", "price_krw", "LAWD_CD"]))
+    if t.empty:
+        return {}
+    t["LAWD_CD"] = t["LAWD_CD"].astype(str).str.zfill(5)
+    t["category"] = t["LAWD_CD"].map(lawd_to_category)
+    t["category_norm"] = t["category"].map(normalize_category_name)
+    t["__age_bucket__"] = age_bucket_2_5_10(t["__age_years__"])
+
+    g = (t.groupby(["category_norm","__age_bucket__"], dropna=False)
+           .agg(avg=("price_krw","mean"), n=("price_krw","count"))
+           .reset_index())
+    p = g.pivot_table(index="category_norm", columns="__age_bucket__", values="avg", aggfunc="first")
+    n = g.groupby("category_norm")["n"].sum()
+
+    out = {}
+    for cat, row in p.iterrows():
+        out[cat] = {
+            "age_02_str":  fmt_eok(row.get("≤2년")),
+            "age_25_str":  fmt_eok(row.get("2~5년")),
+            "age_510_str": fmt_eok(row.get("5~10년")),
+            "age_10p_str": fmt_eok(row.get(">10년")),
+            "age_total_n": int(n.get(cat, 0)),
+        }
+    return out
+
 ageband_tip_by_sgg = build_ageband_by_sigungu(base_trades)
+ageband_tip_by_cat = build_ageband_by_category(base_trades)
 
 # =========================
-# GeoJSON 주입
+# GeoJSON 주입 (연차구간 툴팁 포함)
 # =========================
 def inject_to_sgg(geojson_obj: dict, map_df: pd.DataFrame, vmin: float, vmax: float, extra_tip: dict | None = None):
     """시군구 GeoJSON에 값/색상/툴팁 주입 (+연차구간 툴팁)"""
@@ -340,20 +386,6 @@ def build_cat_df_from_map(map_df: pd.DataFrame) -> pd.DataFrame:
     core = map_df[["LAWD_CD","avg_price_krw","n_trades"]].dropna(subset=["avg_price_krw","n_trades"]).copy()
     core["LAWD_CD"] = core["LAWD_CD"].astype(str).str.zfill(5)
     core["w_sum"] = core["avg_price_krw"] * core["n_trades"]
-
-    def lawd_to_category(lawd_cd: str) -> str:
-        p2 = str(lawd_cd)[:2]
-        if p2 == "11": return "서울"
-        if p2 == "26": return "부산"
-        if p2 == "27": return "대구"
-        if p2 == "28": return "인천"
-        if p2 == "29": return "광주"
-        if p2 == "30": return "대전"
-        if p2 == "31": return "울산"
-        if p2 == "36": return "세종"
-        if p2 == "41": return "수도권"
-        return "지방"
-
     core["category"] = core["LAWD_CD"].map(lawd_to_category)
     cat = (core.groupby("category", dropna=False)
                 .agg(w_sum=("w_sum","sum"), n_trades=("n_trades","sum"))
@@ -362,7 +394,8 @@ def build_cat_df_from_map(map_df: pd.DataFrame) -> pd.DataFrame:
     cat["category_norm"] = cat["category"].map(normalize_category_name)
     return cat
 
-def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
+def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame, extra_tip: dict | None = None):
+    """권역 GeoJSON에 값/색상/툴팁 주입 (+연차구간 툴팁)"""
     vmap = dict(zip(cat_df["category_norm"], cat_df["wavg"]))
     cmap = dict(zip(cat_df["category_norm"], cat_df["n_trades"]))
     vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
@@ -383,7 +416,7 @@ def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
     joined = deepcopy(sgg_type_geo)
     for ft in joined.get("features", []):
         pr = ft.get("properties", {}) or {}
-        nm = extract_type_name(pr)
+        nm = extract_type_name(pr)  # 정규화된 권역명
         v = vmap.get(nm)
         n = int(cmap.get(nm, 0))
         pr["group_name"] = nm or ""
@@ -392,6 +425,18 @@ def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
         pr["n_trades"] = n
         pr["n_trades_str"] = fmt_int(n)
         pr["fill_color"] = color_scale_cat(v, vmin, vmax)
+
+        # 연차구간 툴팁 값 주입
+        tip = extra_tip.get(nm) if extra_tip else None
+        if tip:
+            pr["age_02_str"]  = tip.get("age_02_str", "-")
+            pr["age_25_str"]  = tip.get("age_25_str", "-")
+            pr["age_510_str"] = tip.get("age_510_str", "-")
+            pr["age_10p_str"] = tip.get("age_10p_str", "-")
+            pr["age_total_n"] = tip.get("age_total_n", 0)
+        else:
+            pr["age_02_str"] = pr["age_25_str"] = pr["age_510_str"] = pr["age_10p_str"] = "-"
+            pr["age_total_n"] = 0
     return joined
 
 # =========================
@@ -415,10 +460,10 @@ sgg_all = inject_to_sgg(sgg, map_all, vmin_all, vmax_all, extra_tip=ageband_tip_
 sgg_new = inject_to_sgg(sgg, map_new, vmin_new, vmax_new, extra_tip=ageband_tip_by_sgg)
 sgg_old = inject_to_sgg(sgg, map_old, vmin_old, vmax_old, extra_tip=ageband_tip_by_sgg)
 
-# 권역 지도 데이터(색은 기존 로직)
+# 권역 지도 데이터(색은 기존 로직, 툴팁은 연차구간)
 cat_source = {"전체": map_all, "신축(≤10년)": map_new, "구축(>10년)": map_old}[cat_value_mode]
 cat_df = build_cat_df_from_map(cat_source)
-sgg_type_joined = inject_to_sgg_type(sgg_type, cat_df)
+sgg_type_joined = inject_to_sgg_type(sgg_type, cat_df, extra_tip=ageband_tip_by_cat)
 
 # =========================
 # 레이아웃: 좌/우 지도
@@ -437,7 +482,7 @@ with left:
     else:
         geo_src = sgg_old
 
-    tooltip_html = (
+    tooltip_left_html = (
         "<b>{name}</b>"
         "<br/>≤2년 평균: {age_02_str}"
         "<br/>2~5년 평균: {age_25_str}"
@@ -455,14 +500,24 @@ with left:
             get_line_color=[120,120,140,120],
             line_width_min_pixels=1)],
         initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-        tooltip={"html": tooltip_html,
+        tooltip={"html": tooltip_left_html,
                  "style":{"backgroundColor":"white","color":"black"}}
     )
     st.pydeck_chart(deck_left, use_container_width=True)
 
-# 오른쪽: 권역 지도(툴팁은 기존 평균가)
+# 오른쪽: 권역 지도 (툴팁 = 연차 구간)
 with right:
     st.markdown("#### 권역(서울·부산·…·수도권·지방) 지도")
+    tooltip_right_html = (
+        "<b>{group_name}</b>"
+        "<br/>≤2년 평균: {age_02_str}"
+        "<br/>2~5년 평균: {age_25_str}"
+        "<br/>5~10년 평균: {age_510_str}"
+        "<br/>>10년 평균: {age_10p_str}"
+        "<br/>거래건수(표본): {age_total_n}"
+        "<br/>전체 평균(색 기준): {val_str}"
+    )
+
     deck_right = pdk.Deck(
         layers=[pdk.Layer(
             "GeoJsonLayer",
@@ -472,7 +527,7 @@ with right:
             get_line_color=[100,100,120,140],
             line_width_min_pixels=1.5)],
         initial_view_state=pdk.ViewState(latitude=mid_lat, longitude=mid_lng, zoom=6),
-        tooltip={"html": "<b>{group_name}</b><br/>평균 거래가: {val_str}<br/>거래건수: {n_trades_str}",
+        tooltip={"html": tooltip_right_html,
                  "style":{"backgroundColor":"white","color":"black"}}
     )
     st.pydeck_chart(deck_right, use_container_width=True)
@@ -539,19 +594,6 @@ else:
 # 표: 권역별 요약 (연차 구간)
 # =========================
 st.markdown("### 권역별 요약 (연차 구간)")
-
-def lawd_to_category(lawd_cd: str) -> str:
-    p2 = str(lawd_cd)[:2]
-    if p2 == "11": return "서울"
-    if p2 == "26": return "부산"
-    if p2 == "27": return "대구"
-    if p2 == "28": return "인천"
-    if p2 == "29": return "광주"
-    if p2 == "30": return "대전"
-    if p2 == "31": return "울산"
-    if p2 == "36": return "세종"
-    if p2 == "41": return "수도권"
-    return "지방"
 
 if base_trades.empty or not {"buildYear","price_krw","LAWD_CD"}.issubset(set(base_trades.columns)):
     st.warning("권역 표 생성을 위한 필수 컬럼이 부족합니다. all_trades.parquet을 확인하세요.")
