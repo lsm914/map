@@ -445,8 +445,10 @@ with right:
 # =========================
 st.markdown("### 시군구별 요약 (연차 구간)")
 
-if base_trades.empty or not {"buildYear","price_krw","n_trades","area_band","period_bucket","LAWD_CD","sido_nm","sigungu_nm"}.issubset(set(base_trades.columns)):
-    st.warning("표 생성을 위한 필수 컬럼이 부족합니다. all_trades.parquet에 buildYear/dealYear/deal_date/price_krw/area_band/period_bucket 등이 있어야 합니다.")
+required_cols = {"buildYear","price_krw","LAWD_CD","sido_nm","sigungu_nm"}
+if base_trades.empty or not required_cols.issubset(set(base_trades.columns)):
+    st.warning("표 생성을 위한 필수 컬럼이 부족합니다. all_trades.parquet에 buildYear, price_krw, LAWD_CD, sido_nm, sigungu_nm 이 있어야 합니다.")
+
 else:
     t = base_trades.dropna(subset=["buildYear","price_krw"])
     # 연차 계산
