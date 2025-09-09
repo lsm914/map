@@ -51,15 +51,6 @@ def extract_sgg_code(props):
         return d[:5]
     return None
 
-def norm_name(s):
-    if s is None:
-        return ""
-    s = str(s).strip().lower()
-    for suf in ["시","군","구"]:
-        s = s.replace(suf, "")
-    return s.replace(" ", "")
-
-# --- 구분 지도용 이름 표준화(영문/별칭 포함) ---
 def normalize_category_name(s: str) -> str:
     if s is None:
         return ""
@@ -144,16 +135,25 @@ def load_geojson_url(url: str) -> dict:
 # =========================
 DATA_BASE = "https://raw.githubusercontent.com/lsm914/map/main/data"
 
+# 집계(지도용)
 try:
     agg = load_parquet_local("data/agg_sigungu.parquet")
 except Exception:
     agg = load_parquet_url(f"{DATA_BASE}/agg_sigungu.parquet")
 
+# 원천(표용 — 연차계산)
+try:
+    trades = load_parquet_local("data/all_trades.parquet")
+except Exception:
+    trades = load_parquet_url(f"{DATA_BASE}/all_trades.parquet")
+
+# 메타
 try:
     meta = load_json_local("data/meta.json")
 except Exception:
     meta = load_json_url(f"{DATA_BASE}/meta.json")
 
+# 지오JSON
 try:
     sgg = load_geojson_local("sgg.geojson")
 except Exception:
@@ -170,11 +170,11 @@ except Exception:
 st.sidebar.markdown("### 필터")
 st.sidebar.write(f"데이터 생성: {meta.get('generated_at','-')}")
 
-# (변경) 기간: 라디오 → 멀티셀렉트(중복 선택 가능)
+# 기간(멀티)
 period_options = ["1년~6개월","6개월~3개월","3개월~1개월","최근1개월"]
 periods = st.sidebar.multiselect("기간 (복수 선택 가능)", period_options, default=["최근1개월"])
 
-# (변경) 평형 기본 선택: 35평형만
+# 평형 기본 35평형
 area_choices = ["25평형","31평형","35평형"]
 area_band = st.sidebar.multiselect("평형", area_choices, default=["35평형"])
 
@@ -184,7 +184,7 @@ if "region_group" in agg.columns and agg["region_group"].notna().any():
     region_options += sorted([x for x in agg["region_group"].dropna().unique().tolist() if x])
 region_tab = st.sidebar.radio("권역", region_options, index=0)
 
-# ★ 지도 두 개 모두에 적용될 기준(전체/신축/구축) — 지도는 유지
+# 지도 값 기준(지도는 기존 유지)
 cat_value_mode = st.sidebar.selectbox("지도 값 기준", ["전체","신축(≤10년)","구축(>10년)"], index=0)
 
 # 표 시군구 선택
@@ -199,14 +199,13 @@ selected_labels = st.sidebar.multiselect("표에 표시할 시군구 선택", li
 # =========================
 # 공통 설정
 # =========================
-metric_label = "평균 거래가(억원)"   # 표시는 억원
-value_col = "avg_price_krw"        # 내부 수치는 원
+metric_label = "평균 거래가(억원)"
+value_col = "avg_price_krw"
 
 # =========================
-# 헬퍼: 집계 만들기
+# 필터 함수
 # =========================
-def filter_base(df: pd.DataFrame) -> pd.DataFrame:
-    # (변경) 기간 다중 선택 반영
+def filter_base_agg(df: pd.DataFrame) -> pd.DataFrame:
     d = df[df["period_bucket"].isin(periods)].copy()
     if area_band:
         d = d[d["area_band"].isin(area_band)]
@@ -214,8 +213,20 @@ def filter_base(df: pd.DataFrame) -> pd.DataFrame:
         d = d[d["region_group"].eq(region_tab)]
     return d
 
+def filter_base_trades(df: pd.DataFrame) -> pd.DataFrame:
+    d = df[df["period_bucket"].isin(periods)].copy()
+    if area_band:
+        d = d[d["area_band"].isin(area_band)]
+    if region_tab != "전국" and "region_group" in d.columns:
+        d = d[d["region_group"].eq(region_tab)]
+    return d
+
+# =========================
+# 지도용 집계(agg 사용 — 기존 유지)
+# =========================
+base_agg = filter_base_agg(agg)
+
 def agg_by_sigungu(df_in: pd.DataFrame) -> pd.DataFrame:
-    """시군구별 대표값: 평균(가격), 합계(건수)"""
     g = (df_in.groupby(["LAWD_CD","sido_nm","sigungu_nm"], dropna=False)
               .agg(avg_price_krw=("avg_price_krw","mean"),
                    n_trades=("n_trades","sum"))
@@ -225,7 +236,6 @@ def agg_by_sigungu(df_in: pd.DataFrame) -> pd.DataFrame:
     return g
 
 def agg_by_sigungu_weighted(df_in: pd.DataFrame) -> pd.DataFrame:
-    """신축/구축을 함께 포함한 가중평균(거래건수 가중)"""
     t = df_in[["LAWD_CD","sido_nm","sigungu_nm","avg_price_krw","n_trades"]].dropna(subset=["avg_price_krw","n_trades"]).copy()
     t["w_sum"] = t["avg_price_krw"] * t["n_trades"]
     g = (t.groupby(["LAWD_CD","sido_nm","sigungu_nm"], dropna=False)
@@ -237,14 +247,12 @@ def agg_by_sigungu_weighted(df_in: pd.DataFrame) -> pd.DataFrame:
     return g[["LAWD_CD","sido_nm","sigungu_nm","avg_price_krw","n_trades"]]
 
 def build_map_df_all_new_old(df_base: pd.DataFrame):
-    """지도용 3종 집계 — 지도는 기존 신축/구축 구분 유지"""
     map_all = agg_by_sigungu_weighted(df_base)
     map_new = agg_by_sigungu( df_base[df_base["new_old"].eq("신축(≤10년)")] )
     map_old = agg_by_sigungu( df_base[df_base["new_old"].eq("구축(>10년)")] )
     return map_all, map_new, map_old
 
 def inject_to_sgg(geojson_obj: dict, map_df: pd.DataFrame, vmin: float, vmax: float):
-    """시군구 GeoJSON에 값/색상/툴팁 주입"""
     vals = {str(k).zfill(5): float(v) for k, v in zip(map_df["LAWD_CD"], map_df["avg_price_krw"]) if pd.notna(v)}
     cnts = {str(k).zfill(5): int(v)   for k, v in zip(map_df["LAWD_CD"], map_df["n_trades"])}
     sidos= {str(k).zfill(5): s        for k, s in zip(map_df["LAWD_CD"], map_df["sido_nm"])}
@@ -278,7 +286,6 @@ def inject_to_sgg(geojson_obj: dict, map_df: pd.DataFrame, vmin: float, vmax: fl
     return joined
 
 def build_cat_df_from_map(map_df: pd.DataFrame) -> pd.DataFrame:
-    """시군구 집계(map_df)에서 권역(서울/…/수도권/지방) 가중평균"""
     core = map_df[["LAWD_CD","avg_price_krw","n_trades"]].dropna(subset=["avg_price_krw","n_trades"]).copy()
     core["LAWD_CD"] = core["LAWD_CD"].astype(str).str.zfill(5)
     core["w_sum"] = core["avg_price_krw"] * core["n_trades"]
@@ -305,7 +312,6 @@ def build_cat_df_from_map(map_df: pd.DataFrame) -> pd.DataFrame:
     return cat
 
 def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
-    """구분 GeoJSON에 값/색상/툴팁 주입"""
     vmap = dict(zip(cat_df["category_norm"], cat_df["wavg"]))
     cmap = dict(zip(cat_df["category_norm"], cat_df["n_trades"]))
     vmin = float(cat_df["wavg"].min()) if cat_df["wavg"].notna().any() else 0.0
@@ -326,7 +332,7 @@ def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
     joined = deepcopy(sgg_type_geo)
     for ft in joined.get("features", []):
         pr = ft.get("properties", {}) or {}
-        nm = extract_type_name(pr)  # 서울/부산/…/수도권/지방
+        nm = extract_type_name(pr)
         v = vmap.get(nm)
         n = int(cmap.get(nm, 0))
         pr["group_name"] = nm or ""
@@ -338,44 +344,36 @@ def inject_to_sgg_type(sgg_type_geo: dict, cat_df: pd.DataFrame):
     return joined
 
 # =========================
-# (신규 유틸) 연차 구간 계산
+# 연차 구간 유틸(표용 — trades 사용)
 # =========================
-def _get_ref_year(meta: dict) -> int:
-    """참조 연도: meta.ref_date(YYYY-MM/DD) 또는 generated_at → 연도, 없으면 올해"""
-    ref = meta.get("ref_date") or meta.get("generated_at") or ""
-    try:
-        y = int(str(ref).split("-")[0])
-        if 1900 <= y <= 2100:
-            return y
-    except Exception:
-        pass
-    return datetime.today().year
+def ensure_age_years_from_trades(df: pd.DataFrame) -> pd.Series:
+    """dealYear 없으면 deal_date.year, buildYear 없으면 NaN"""
+    deal_year = df.get("dealYear")
+    if deal_year is None or df["dealYear"].isna().all():
+        # datetime에서 연도 추출
+        if "deal_date" in df.columns:
+            deal_year = pd.to_datetime(df["deal_date"], errors="coerce").dt.year
+        else:
+            deal_year = pd.NA
+    build_year = pd.to_numeric(df.get("buildYear"), errors="coerce")
+    age = pd.to_numeric(deal_year, errors="coerce") - build_year
+    return age
 
-def _ensure_age_years(df: pd.DataFrame, meta: dict) -> pd.Series | None:
-    """age_years가 없으면 build_year/avg_build_year로 계산"""
-    if "age_years" in df.columns:
-        return pd.to_numeric(df["age_years"], errors="coerce")
-    ref_year = _get_ref_year(meta)
-    if "build_year" in df.columns:
-        by = pd.to_numeric(df["build_year"], errors="coerce")
-        return ref_year - by
-    if "avg_build_year" in df.columns:
-        by = pd.to_numeric(df["avg_build_year"], errors="coerce")
-        return ref_year - by
-    return None
-
-def _age_bucket_2_5_10(age_years: pd.Series) -> pd.Series:
-    """연차 → 구간 레이블: ≤2, 2~5, 5~10, >10"""
+def age_bucket_2_5_10(age_years: pd.Series) -> pd.Series:
     bins = [-np.inf, 2, 5, 10, np.inf]
     labels = ["≤2년","2~5년","5~10년",">10년"]
     return pd.cut(age_years, bins=bins, labels=labels, right=True, include_lowest=True)
 
 # =========================
-# 필터 적용 및 지도 데이터 생성(지도는 기존 기준 유지)
+# 필터 적용
 # =========================
-base = filter_base(agg)
+base_trades = filter_base_trades(trades)
+base_agg = filter_base_agg(agg)
 
-map_all, map_new, map_old = build_map_df_all_new_old(base)
+# =========================
+# 지도 데이터 생성 (agg 기반 — 기존 유지)
+# =========================
+map_all, map_new, map_old = build_map_df_all_new_old(base_agg)
 
 def get_range(dfmap):
     v = dfmap["avg_price_krw"]
@@ -397,24 +395,20 @@ cat_df = build_cat_df_from_map(cat_source)
 sgg_type_joined = inject_to_sgg_type(sgg_type, cat_df)
 
 # =========================
-# 레이아웃: 좌우 지도 (시군구 / 구분)
+# 레이아웃: 좌/우 지도
 # =========================
 st.markdown(f"## 지도 — 기준: {cat_value_mode}")
-
 left, right = st.columns(2)
 mid_lat, mid_lng = 36.5, 127.8
 
 with left:
     st.markdown("#### 시군구 지도")
     if cat_value_mode == "전체":
-        geo_src = sgg_all
-        tip_label = "평균 거래가"
+        geo_src = sgg_all; tip_label = "평균 거래가"
     elif cat_value_mode == "신축(≤10년)":
-        geo_src = sgg_new
-        tip_label = "신축 평균"
+        geo_src = sgg_new; tip_label = "신축 평균"
     else:
-        geo_src = sgg_old
-        tip_label = "구축 평균"
+        geo_src = sgg_old; tip_label = "구축 평균"
 
     deck_left = pdk.Deck(
         layers=[pdk.Layer(
@@ -447,76 +441,64 @@ with right:
     st.pydeck_chart(deck_right, use_container_width=True)
 
 # =========================
-# 표: 시군구별 요약 (연차 구간)  ← (기존 신축/구축 표 대체)
+# 표: 시군구별 요약 (연차 구간) — trades 사용
 # =========================
 st.markdown("### 시군구별 요약 (연차 구간)")
 
-df_table_src = base.copy()
-ages = _ensure_age_years(df_table_src, meta)
-if ages is None:
-    st.warning("연차(준공연도) 정보를 확인할 수 없어 표를 생성하지 못했습니다. ETL에서 age_years 또는 build_year/avg_build_year를 포함하세요.")
+if base_trades.empty or not {"buildYear","price_krw","n_trades","area_band","period_bucket","LAWD_CD","sido_nm","sigungu_nm"}.issubset(set(base_trades.columns)):
+    st.warning("표 생성을 위한 필수 컬럼이 부족합니다. all_trades.parquet에 buildYear/dealYear/deal_date/price_krw/area_band/period_bucket 등이 있어야 합니다.")
 else:
-    t = df_table_src.copy()
-    t["__age_years__"] = pd.to_numeric(ages, errors="coerce")
-    t = t.dropna(subset=["__age_years__", "avg_price_krw", "n_trades"])
-    if t.empty:
-        st.info("연차·가격·거래건수 유효 데이터가 없어 표시할 내용이 없습니다.")
-    else:
-        t["__age_bucket__"] = _age_bucket_2_5_10(t["__age_years__"])
-        t["w_sum"] = t["avg_price_krw"] * t["n_trades"]
+    t = base_trades.dropna(subset=["buildYear","price_krw"])
+    # 연차 계산
+    age_years = ensure_age_years_from_trades(t)
+    t = t.assign(__age_years__=pd.to_numeric(age_years, errors="coerce")).dropna(subset=["__age_years__"])
+    t["__age_bucket__"] = age_bucket_2_5_10(t["__age_years__"])
+    # 거래건수 가중 평균 (만원→원 이미 price_krw)
+    t["w_sum"] = t["price_krw"] * 1  # 행단위라 그대로 합치고, n_trades는 건수 재계산
+    # 시군구 × 연차 구간
+    g = (t.groupby(["LAWD_CD","sido_nm","sigungu_nm","__age_bucket__"], dropna=False)
+           .agg(avg_price_krw=("price_krw","mean"),
+                n=("price_krw","count"))
+           .reset_index())
+    # 피벗
+    pvt = g.pivot_table(index=["LAWD_CD","sido_nm","sigungu_nm"],
+                        columns="__age_bucket__", values="avg_price_krw", aggfunc="first").reset_index()
+    # 총 거래건수
+    n_sum = (t.groupby(["LAWD_CD"]).agg(n_total=("price_krw","count")).reset_index())
 
-        # 시군구 × 연차구간 가중평균
-        g = (t.groupby(["LAWD_CD","sido_nm","sigungu_nm","__age_bucket__"], dropna=False)
-               .agg(w_sum=("w_sum","sum"), n=("n_trades","sum"))
-               .reset_index())
-        g["wavg"] = np.where(g["n"]>0, g["w_sum"]/g["n"], np.nan)
+    table = pvt.merge(n_sum, on="LAWD_CD", how="left").rename(columns={
+        "sido_nm":"시도","sigungu_nm":"시군구",
+        "≤2년":"≤2년(억원)","2~5년":"2~5년(억원)","5~10년":"5~10년(억원)",">10년":">10년(억원)",
+        "n_total":"거래건수"
+    })
 
-        pivot = g.pivot_table(index=["LAWD_CD","sido_nm","sigungu_nm"],
-                              columns="__age_bucket__", values="wavg", aggfunc="first").reset_index()
+    if selected_labels:
+        selected_codes = [str(options[label]).zfill(5) for label in selected_labels]
+        table = table[table["LAWD_CD"].astype(str).str.zfill(5).isin(selected_codes)]
 
-        # 전체 거래건수(모든 연차구간 합)
-        n_sum = (g.groupby(["LAWD_CD"]).agg(n_total=("n","sum")).reset_index())
+    for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
+        if c in table.columns:
+            table[c] = table[c].map(fmt_eok)
+    table["거래건수"] = table["거래건수"].fillna(0).astype(int).map(fmt_int)
 
-        table = pivot.merge(n_sum, on="LAWD_CD", how="left")
-        table = table.rename(columns={
-            "sido_nm":"시도",
-            "sigungu_nm":"시군구",
-            "≤2년":"≤2년(억원)",
-            "2~5년":"2~5년(억원)",
-            "5~10년":"5~10년(억원)",
-            ">10년":">10년(억원)",
-            "n_total":"거래건수"
-        })
+    # 정렬: 구간 중 최대값 기준
+    sort_key = []
+    for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
+        if c in table.columns:
+            sort_key.append(pd.to_numeric(table[c].str.replace("억원","", regex=False).str.replace(",",""), errors="coerce"))
+    if sort_key:
+        sk = pd.concat(sort_key, axis=1).max(axis=1)
+        table = table.assign(__sort__=sk).sort_values("__sort__", ascending=False).drop(columns="__sort__")
 
-        # 사이드바 선택 시군구 필터
-        if selected_labels:
-            selected_codes = [str(options[label]).zfill(5) for label in selected_labels]
-            table = table[table["LAWD_CD"].astype(str).str.zfill(5).isin(selected_codes)]
-
-        # 포맷
-        for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
-            if c in table.columns:
-                table[c] = table[c].map(fmt_eok)
-        table["거래건수"] = table["거래건수"].fillna(0).astype(int).map(fmt_int)
-
-        # 정렬: 각 행의 구간 값 중 최대값 기준 내림차순
-        sort_key = []
-        for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
-            if c in table.columns:
-                sort_key.append(pd.to_numeric(table[c].str.replace("억원","", regex=False).str.replace(",",""), errors="coerce"))
-        if sort_key:
-            sk = pd.concat(sort_key, axis=1).max(axis=1)
-            table = table.assign(__sort__=sk).sort_values("__sort__", ascending=False).drop(columns="__sort__")
-
-        st.dataframe(
-            table[["시도","시군구"]
-                  + [c for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"] if c in table.columns]
-                  + ["거래건수"]],
-            use_container_width=True
-        )
+    st.dataframe(
+        table[["시도","시군구"]
+              + [c for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"] if c in table.columns]
+              + ["거래건수"]],
+        use_container_width=True
+    )
 
 # =========================
-# 표: 권역별 요약 (연차 구간)  ← (기존 권역 신축/구축 표 대체)
+# 표: 권역별 요약 (연차 구간) — trades 사용
 # =========================
 st.markdown("### 권역별 요약 (연차 구간)")
 
@@ -533,51 +515,40 @@ def lawd_to_category(lawd_cd: str) -> str:
     if p2 == "41": return "수도권"
     return "지방"
 
-ages2 = _ensure_age_years(base, meta)
-if ages2 is None:
-    st.warning("연차(준공연도) 정보를 확인할 수 없어 권역 표를 생성하지 못했습니다.")
+if base_trades.empty or not {"buildYear","price_krw","period_bucket","LAWD_CD"}.issubset(set(base_trades.columns)):
+    st.warning("권역 표 생성을 위한 필수 컬럼이 부족합니다. all_trades.parquet을 확인하세요.")
 else:
-    t2 = base.copy()
-    t2["__age_years__"] = pd.to_numeric(ages2, errors="coerce")
-    t2 = t2.dropna(subset=["__age_years__", "avg_price_krw", "n_trades"])
-    if t2.empty:
-        st.info("연차·가격·거래건수 유효 데이터가 없어 표시할 내용이 없습니다.")
-    else:
-        t2["__age_bucket__"] = _age_bucket_2_5_10(t2["__age_years__"])
-        t2["LAWD_CD"] = t2["LAWD_CD"].astype(str).str.zfill(5)
-        t2["category"] = t2["LAWD_CD"].map(lawd_to_category)
-        t2["w_sum"] = t2["avg_price_krw"] * t2["n_trades"]
+    tt = base_trades.dropna(subset=["buildYear","price_krw"]).copy()
+    tt["LAWD_CD"] = tt["LAWD_CD"].astype(str).str.zfill(5)
+    tt["category"] = tt["LAWD_CD"].map(lawd_to_category)
+    age_years2 = ensure_age_years_from_trades(tt)
+    tt = tt.assign(__age_years__=pd.to_numeric(age_years2, errors="coerce")).dropna(subset=["__age_years__"])
+    tt["__age_bucket__"] = age_bucket_2_5_10(tt["__age_years__"])
 
-        # 권역 × 연차구간 가중평균
-        g2 = (t2.groupby(["category","__age_bucket__"], dropna=False)
-                .agg(w_sum=("w_sum","sum"), n=("n_trades","sum"))
-                .reset_index())
-        g2["wavg"] = np.where(g2["n"]>0, g2["w_sum"]/g2["n"], np.nan)
+    g2 = (tt.groupby(["category","__age_bucket__"], dropna=False)
+            .agg(avg_price_krw=("price_krw","mean"),
+                 n=("price_krw","count"))
+            .reset_index())
 
-        pivot2 = g2.pivot_table(index=["category"], columns="__age_bucket__",
-                                values="wavg", aggfunc="first").reset_index()
+    p2 = g2.pivot_table(index=["category"], columns="__age_bucket__",
+                        values="avg_price_krw", aggfunc="first").reset_index()
+    n2 = (tt.groupby(["category"]).agg(n_total=("price_krw","count")).reset_index())
 
-        # 권역별 총 거래건수(모든 구간 합)
-        n_sum2 = (g2.groupby(["category"]).agg(n_total=("n","sum")).reset_index())
+    out = p2.merge(n2, on="category", how="left")
+    out["권역"] = out["category"].map(normalize_category_name)
+    out = out.rename(columns={
+        "≤2년":"≤2년(억원)","2~5년":"2~5년(억원)","5~10년":"5~10년(억원)",">10년":">10년(억원)",
+        "n_total":"거래건수"
+    })
 
-        out = pivot2.merge(n_sum2, on="category", how="left")
-        out["권역"] = out["category"].map(normalize_category_name)
-        out = out.rename(columns={
-            "≤2년":"≤2년(억원)",
-            "2~5년":"2~5년(억원)",
-            "5~10년":"5~10년(억원)",
-            ">10년":">10년(억원)",
-            "n_total":"거래건수"
-        })
+    for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
+        if c in out.columns:
+            out[c] = out[c].map(fmt_eok)
+    out["거래건수"] = out["거래건수"].fillna(0).astype(int).map(fmt_int)
 
-        for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"]:
-            if c in out.columns:
-                out[c] = out[c].map(fmt_eok)
-        out["거래건수"] = out["거래건수"].fillna(0).astype(int).map(fmt_int)
+    order = ["서울","부산","대구","인천","광주","대전","울산","세종","수도권","지방"]
+    out["__order__"] = out["권역"].apply(lambda x: order.index(x) if x in order else 999)
+    out = out.sort_values("__order__").drop(columns=["__order__","category"])
 
-        order = ["서울","부산","대구","인천","광주","대전","울산","세종","수도권","지방"]
-        out["__order__"] = out["권역"].apply(lambda x: order.index(x) if x in order else 999)
-        out = out.sort_values("__order__").drop(columns=["__order__","category"])
-
-        cols_show = ["권역"] + [c for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"] if c in out.columns] + ["거래건수"]
-        st.dataframe(out[cols_show], use_container_width=True)
+    cols_show = ["권역"] + [c for c in ["≤2년(억원)","2~5년(억원)","5~10년(억원)",">10년(억원)"] if c in out.columns] + ["거래건수"]
+    st.dataframe(out[cols_show], use_container_width=True)
